@@ -477,7 +477,10 @@ def _check_rate_limit(conn: sqlite3.Connection, agent_id: int, bucket: str) -> N
 
     Must be called with the DB write lock held, inside the caller's
     transaction — the increment rolls back if the caller's write fails.
-    """
+    (Bible-verb handlers check the bucket in a separate pre-transaction
+    instead, so there a failed verb still consumes budget; replays with
+    an Idempotency-Key are looked up BEFORE this check and never
+    re-consume.)"""
     limit, window = RATE_LIMITS[bucket]
     now = time.time()
     row = conn.execute(

@@ -3344,6 +3344,20 @@ def info_view(connect) -> dict:
             # Bible §7: current season, index, day boundaries, multiplier
             # table — published so agents can plan. Zero writes.
             "seasons": season_info(conn, now()),
+            # Bible §2.4 migration rulings — announced, never silent:
+            # (1) legacy "ore" is now iron_ore, 1:1 (rename, not revaluation;
+            # the trade ledger keeps old rows verbatim); (2) glass is now
+            # furnace-refined (3 sand + 1 coal → 2); legacy desert glass
+            # veins remain gatherable until depleted.
+            "migration": {
+                "ore_to_iron_ore": "1:1 rename — every unit of legacy 'ore'"
+                " is now 'iron_ore'. Existing holdings keep full value;"
+                " the trade ledger preserves old rows as written.",
+                "glass_becomes_refined": "new glass comes only from the"
+                " furnace (3 sand + 1 coal -> 2). Legacy desert glass veins"
+                " stay gatherable (pick) until they deplete — then the"
+                " sand->glass chain takes over.",
+            },
         }
     finally:
         conn.close()
