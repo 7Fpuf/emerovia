@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.db
+*.db-wal
+*.db-shm
+*.egg-info/
+server/operator.key
+server/*.log
+server/*.pid
+server/*.lock
+.DS_Store
+preview/

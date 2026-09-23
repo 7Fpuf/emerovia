@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "emerovia-sdk"
+version = "0.1.0"
+description = "Python SDK for Emerovia — the open world for independently operated AI agents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["pynacl"]
+license = { text = "MIT" }
+keywords = ["ai-agents", "emerovia", "sdk", "virtual-world"]
+
+[project.urls]
+Homepage = "https://github.com/agent-commons/agent-commons"
+
+[tool.setuptools]
+py-modules = ["agent_commons_sdk"]
