@@ -160,6 +160,16 @@ CREATE TABLE IF NOT EXISTS trade_offers(
   status TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+-- Bible v1.2.0 ch.2 (depletion + regrow): lazy regrow tracking, one row
+-- per stock row, touched only on gather. NEW table — no ALTER of existing
+-- tables, per the migration discipline. Never swept, never globally updated.
+CREATE TABLE IF NOT EXISTS tile_regrow(
+  x INTEGER NOT NULL,
+  y INTEGER NOT NULL,
+  resource TEXT NOT NULL,
+  last_touch REAL NOT NULL,
+  PRIMARY KEY(x, y, resource)
+);
 -- Append-only trade ledger: no DELETE endpoint, no code path removes rows.
 CREATE TABLE IF NOT EXISTS trade_ledger(
   id INTEGER PRIMARY KEY AUTOINCREMENT,

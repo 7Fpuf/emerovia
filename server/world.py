@@ -73,6 +73,13 @@ INVENTORY_CAP = 99
 STOCK_SEED_MIN = 5
 STOCK_SEED_MOD = 6
 
+# ---- Bible §3 — depletion + regrow -----------------------------------------
+# Wild tiles regrow 1 unit per (tile, resource) per 7 days, capped at the
+# seeded max. Lazy: tracked in tile_regrow, applied on gather — never a sweep.
+REGROW_SECONDS = 604800
+REGROW_UNITS = 1
+
+
 # ---- Bible §2.4 ruling 3 — overlay re-seed --------------------------------
 # Deterministic under a seed DISTINCT from the genesis stock seed, so the two
 # passes are uncorrelated. Exactly one overlay resource per land tile,
@@ -576,6 +583,74 @@ def _resolve_gather_resource(
     return resource
 
 
+def _seeded_max(x: int, y: int, resource: str) -> int:
+    """Regrow cap: the seeded max for a (tile, resource) stock row.
+
+    Legacy rows use the genesis-seed function (with the original ore name);
+    overlay rows use the NATURAL_SEED banded function. The two resource sets
+    are disjoint, so membership alone disambiguates.
+    """
+    if resource in OVERLAY_RESOURCES:
+        return overlay_stock_for_tile(x, y, resource)
+    return stock_for_tile(x, y, resource)
+
+
+def _apply_regrow_tile(conn: sqlite3.Connection, x: int, y: int, now_ts: float) -> None:
+    """Apply the regrow trickle to every stock row on one tile.
+
+    Runs before resource resolution so a fully-stripped row that has earned
+    regrow is visible again. Bounded: at most two rows per tile (legacy +
+    overlay). Still lazy — only the tile being gathered is touched.
+    """
+    conn.row_factory = sqlite3.Row
+    resources = [
+        r["resource"]
+        for r in conn.execute(
+            "SELECT resource FROM world_resource_stock WHERE x = ? AND y = ?", (x, y)
+        ).fetchall()
+    ]
+    for resource in resources:
+        _apply_regrow_row(conn, x, y, resource, now_ts)
+
+
+def _apply_regrow_row(
+    conn: sqlite3.Connection, x: int, y: int, resource: str, now_ts: float
+) -> None:
+    """Bible §3.2: lazy regrow, 1 unit per (tile, resource) per 7 days.
+
+    Applied on gather, inside the caller's transaction: floor((now -
+    last_touch) / 604800) units are added, capped at the seeded max, and
+    last_touch advances to now. The first touch after v1.2.0 only starts the
+    clock (no retroactive refill): a tile stripped long ago does not refill
+    on deploy — the trickle starts being tracked from first contact.
+    """
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT last_touch FROM tile_regrow WHERE x = ? AND y = ? AND resource = ?",
+        (x, y, resource),
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT OR IGNORE INTO tile_regrow (x, y, resource, last_touch)"
+            " VALUES (?, ?, ?, ?)",
+            (x, y, resource, now_ts),
+        )
+        return
+    last_touch = float(row["last_touch"])
+    units = int((now_ts - last_touch) // REGROW_SECONDS) * REGROW_UNITS
+    if units > 0:
+        cap = _seeded_max(x, y, resource)
+        conn.execute(
+            "UPDATE world_resource_stock SET stock = MIN(?, stock + ?)"
+            " WHERE x = ? AND y = ? AND resource = ?",
+            (cap, units, x, y, resource),
+        )
+    conn.execute(
+        "UPDATE tile_regrow SET last_touch = ? WHERE x = ? AND y = ? AND resource = ?",
+        (now_ts, x, y, resource),
+    )
+
+
 def gather(
     connect,
     agent_id: int,
@@ -592,10 +667,12 @@ def gather(
     depleted tiles refuse (400), per-resource inventory cap is 99 (400),
     and insufficient AP is 402 — same convention as move/disclose.
     (Tool gating lands in the tools chapter; this keeps the flat rate.)
+    Regrow (§3.2) is applied before the stock decrement, in-transaction.
     """
     conn = connect()
     try:
         st = _regen(conn, agent_id, now_ts)
+        _apply_regrow_tile(conn, st["x"], st["y"], now_ts)
         resource = _resolve_gather_resource(conn, st["x"], st["y"], resource)
         if st["ap"] < GATHER_COST:
             raise InsufficientAP(st["ap"], GATHER_COST)
