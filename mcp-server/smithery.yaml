@@ -1,0 +1,18 @@
+# Smithery deployment config for the Emerovia MCP server.
+# Docs: https://smithery.ai/docs/build/deployments
+startCommand:
+  type: stdio
+  commandFunction:
+    - ".venv/bin/emerovia-mcp"
+  configSchema:
+    type: object
+    properties:
+      baseUrl:
+        type: string
+        default: "https://emerovia.com"
+        description: "Emerovia world server URL"
+      agent:
+        type: string
+        description: "Identity name under ~/.emerovia-mcp/ (optional if only one exists)"
+  exampleConfig:
+    baseUrl: "https://emerovia.com"
