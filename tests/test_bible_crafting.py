@@ -96,6 +96,27 @@ def db(db_path):
     return conn
 
 
+def set_genesis_days_ago(db_path, days):
+    conn = db(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO world_meta (key, value) VALUES ('genesis_ts', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = ?",
+            (str(time.time() - days * 86400),) * 2,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def pin_neutral_season(db_path, terrain):
+    """Pin the season clock to a season where the terrain's resource has a
+    1.00 abundance multiplier, so tooled-gather yield assertions stay
+    deterministic under the §7 season table."""
+    days = {"plains": 28, "forest": 20, "mountain": 0, "desert": 0}[terrain]
+    set_genesis_days_ago(db_path, days)
+
+
 def set_inventory(db_path, pubkey, items: dict):
     conn = db(db_path)
     try:
@@ -395,6 +416,7 @@ def test_bounty_tool_adds_gather_yield(b4, monkeypatch):
     tool = TERRAIN_TOOL[me["terrain"]]
     bounty = TERRAIN_BOUNTY[me["terrain"]]
     pk = pubkey_hex(keys[0])
+    pin_neutral_season(db_path, me["terrain"])
     set_inventory(db_path, pk, recipe_inputs(bounty))
     r = signed_request(client, keys[0], "POST", "/world/experiment",
                        {"items": recipe_inputs(bounty)})

@@ -130,6 +130,28 @@ def tool_durability(db_path, pubkey, recipe_id):
         conn.close()
 
 
+def set_genesis_days_ago(db_path, days):
+    conn = db(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO world_meta (key, value) VALUES ('genesis_ts', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = ?",
+            (str(time.time() - days * 86400),) * 2,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def pin_neutral_season(db_path, terrain):
+    """Pin the season clock to a season where the terrain's resource has a
+    1.00 abundance multiplier, so tooled-gather yield assertions stay
+    deterministic under the §7 season table (plains→autumn grain 1.00,
+    forest→summer timber 1.00; iron_ore/glass are 1.00 in spring)."""
+    days = {"plains": 28, "forest": 20, "mountain": 0, "desert": 0}[terrain]
+    set_genesis_days_ago(db_path, days)
+
+
 def set_ap(db_path, pubkey, ap):
     conn = db(db_path)
     try:
@@ -197,6 +219,7 @@ def test_matching_tool_gather_costs_2_yields_2(b3, monkeypatch):
     monkeypatch.setitem(appmod.RATE_LIMITS, "gather", (100, 60))
     spawn(client, keys[0])
     me = signed_request(client, keys[0], "GET", "/world/me", {}).json()
+    pin_neutral_season(db_path, me["terrain"])
     res = TERRAIN_RESOURCE[me["terrain"]]
     tool = TERRAIN_TOOL[me["terrain"]]
     give_tool(db_path, pubkey_hex(keys[0]), tool)
@@ -277,6 +300,7 @@ def test_tool_breaks_at_zero_durability(b3, monkeypatch):
     res = TERRAIN_RESOURCE[me["terrain"]]
     tool = TERRAIN_TOOL[me["terrain"]]
     pk = pubkey_hex(keys[0])
+    pin_neutral_season(db_path, me["terrain"])
     give_tool(db_path, pk, tool, durability=2)
     r1 = gather(client, keys[0], res)
     assert r1.status_code == 200, r1.text
@@ -325,6 +349,7 @@ def test_inventory_cap_blocks_overfill(b3, monkeypatch):
     res = TERRAIN_RESOURCE[me["terrain"]]
     tool = TERRAIN_TOOL[me["terrain"]]
     pk = pubkey_hex(keys[0])
+    pin_neutral_season(db_path, me["terrain"])
     give_tool(db_path, pk, tool)
     set_inventory(db_path, pk, res, 98)  # 98 + 2 > 99
     r = gather(client, keys[0], res)

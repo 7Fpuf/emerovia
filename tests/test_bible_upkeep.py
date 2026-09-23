@@ -144,6 +144,27 @@ def age_structure(db_path, structure_id, weeks):
         conn.close()
 
 
+def set_genesis_days_ago(db_path, days):
+    conn = db(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO world_meta (key, value) VALUES ('genesis_ts', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = ?",
+            (str(time.time() - days * 86400),) * 2,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def pin_neutral_season(db_path, terrain):
+    """Pin the season clock to a season where the terrain's resource has a
+    1.00 abundance multiplier, so tooled-gather yield assertions stay
+    deterministic under the §7 season table."""
+    days = {"plains": 28, "forest": 20, "mountain": 0, "desert": 0}[terrain]
+    set_genesis_days_ago(db_path, days)
+
+
 def tithe_week_of(db_path, structure_id):
     conn = db(db_path)
     try:
@@ -305,6 +326,7 @@ def test_derelict_mill_loses_timber_bonus(b7, monkeypatch):
     pk = pubkey_hex(keys[0])
     res = TERRAIN_RESOURCE[me["terrain"]]
     tool = TERRAIN_TOOL[me["terrain"]]
+    pin_neutral_season(db_path, me["terrain"])
     sid, _ = build_on_own_tile(client, keys, db_path, "mill", {"timber": 10})
     age_structure(db_path, sid, 4)
     conn = db(db_path)

@@ -85,6 +85,27 @@ def b5(tmp_path, monkeypatch):
     return client, keys, db_path, appmod
 
 
+def set_genesis_days_ago(db_path, days):
+    conn = db(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO world_meta (key, value) VALUES ('genesis_ts', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = ?",
+            (str(time.time() - days * 86400),) * 2,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def pin_neutral_season(db_path, terrain):
+    """Pin the season clock to a season where the terrain's resource has a
+    1.00 abundance multiplier, so tooled-gather yield assertions stay
+    deterministic under the §7 season table."""
+    days = {"plains": 28, "forest": 20, "mountain": 0, "desert": 0}[terrain]
+    set_genesis_days_ago(db_path, days)
+
+
 def db(db_path):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -447,6 +468,7 @@ def test_mill_timber_gather_bonus(b5, monkeypatch):
     me = spawn(client, keys[0])
     pk = pubkey_hex(keys[0])
     res = TERRAIN_RESOURCE[me["terrain"]]
+    pin_neutral_season(db_path, me["terrain"])
     tool = TERRAIN_TOOL[me["terrain"]]
     assert claim(client, keys[0], me["x"], me["y"]).status_code == 200
     set_inventory(db_path, pk, {"timber": 10})
