@@ -127,6 +127,40 @@ BOUNTY_TOOL_FOR_RESOURCE = {
 DISCOVERED_CRAFT_AP = 5
 EXPERIMENT_AP = 2
 RECIPE_DISCOVERY_SEED = "emerovia-discovery-v1"
+
+# ---- Bible §5 — refining + §6 buildings -------------------------------------
+# Refinery: 1 AP-batch... each recipe turns raw inputs into exactly 1
+# refined unit. A furnace (owned structure) is required.
+REFINERY_RECIPES = {
+    # item: (inputs, ap_cost)
+    "lumber": ({"timber": 2}, 4),
+    "iron":   ({"iron_ore": 2}, 6),
+    "copper": ({"copper_ore": 2}, 6),
+    "glass":  ({"sand": 4}, 8),
+    "flour":  ({"grain": 3}, 2),
+    "brick":  ({"clay": 4}, 4),
+}
+# Functional structures: fixed material + AP costs (§6). Flavor structures
+# (any other kind) cost 5 timber + 5 AP — Bible §6 names no flavor cost,
+# so this is a documented judgment call against free-structure spam.
+STRUCTURE_DEFS = {
+    "furnace": ({"stone": 10}, 10),
+    "mill":    ({"timber": 10}, 10),
+    "shelter": ({"timber": 8}, 8),
+}
+FLAVOR_STRUCTURE_INPUTS = {"timber": 5}
+FLAVOR_STRUCTURE_AP = 5
+BUILDABLE_FUNCTIONAL = ("furnace", "mill", "shelter")
+# Land claims: 6 per agent, claimed within a 3-tile (Chebyshev) radius of
+# the agent, 2 AP per claim action. Claims are permanent (no release).
+CLAIM_MAX = 6
+CLAIM_RADIUS = 3
+CLAIM_AP = 2
+
+
+def _tithe_week(now_ts: float) -> int:
+    """7-day tithe weeks since the unix epoch — the upkeep clock (§8)."""
+    return int(now_ts // 604800)
 # Chits are simulation credits (see server/app.py): valueless, transferable
 # only inside trade offers, never redeemable.
 CHITS_ITEM = "chits"
@@ -884,6 +918,16 @@ def _gather_yield(conn: sqlite3.Connection, pubkey: str, resource: str,
     if not tooled:
         return GATHER_BARE_YIELD
     y = max(1, GATHER_TOOLED_YIELD + _season_gather_adj(now_ts))
+    # Mill +1 timber while the owner holds a mill (ch.5). Derelict
+    # filtering lands with upkeep in ch.8.
+    if resource == "timber":
+        mill = conn.execute(
+            "SELECT 1 FROM structures WHERE owner_pubkey = ? AND kind = 'mill'"
+            " LIMIT 1",
+            (pubkey,),
+        ).fetchone()
+        if mill is not None:
+            y += 1
     # Discovered bounty passives (ch.4): +1 on their resource while owned.
     bounty = BOUNTY_TOOL_FOR_RESOURCE.get(resource)
     if bounty is not None and _owns_tool(conn, pubkey, bounty):
@@ -1298,6 +1342,179 @@ def experiment(connect, agent_id: int, agent_name: str, now_ts: float,
         conn.close()
 
 
+def claim(connect, agent_id: int, now_ts: float, x: int, y: int) -> dict:
+    """Claim a land tile. Bible §6.
+
+    6 claims per agent, land only, unclaimed only, within a 3-tile
+    (Chebyshev) radius of the agent, 2 AP per claim. Claims are permanent.
+    Atomic: AP + claim row commit together.
+    """
+    conn = connect()
+    try:
+        st = _regen(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        terrain = _tile_terrain(conn, x, y)
+        if terrain is None:
+            raise ClaimError("no such tile")
+        if terrain == "ocean":
+            raise ClaimError("cannot claim ocean")
+        if max(abs(x - st["x"]), abs(y - st["y"])) > CLAIM_RADIUS:
+            raise ClaimError(f"tile beyond {CLAIM_RADIUS}-tile claim radius")
+        n = conn.execute(
+            "SELECT COUNT(*) FROM claims WHERE owner_pubkey = ?", (pubkey,)
+        ).fetchone()[0]
+        if n >= CLAIM_MAX:
+            raise ClaimError(f"claim limit reached ({CLAIM_MAX})")
+        if st["ap"] < CLAIM_AP:
+            raise InsufficientAP(st["ap"], CLAIM_AP)
+        try:
+            conn.execute(
+                "INSERT INTO claims (x, y, owner_pubkey, claimed_at)"
+                " VALUES (?, ?, ?, ?)",
+                (x, y, pubkey,
+                 time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts))),
+            )
+        except sqlite3.IntegrityError:
+            raise ClaimError("tile already claimed")
+        new_ap = st["ap"] - CLAIM_AP
+        conn.execute(
+            "UPDATE agent_world SET ap = ?, last_update = ? WHERE agent_id = ?",
+            (float(new_ap), now_ts, agent_id),
+        )
+        conn.commit()
+        return {"x": x, "y": y, "ap": new_ap, "claims": n + 1}
+    finally:
+        conn.close()
+
+
+def build(connect, agent_id: int, agent_name: str, now_ts: float, kind: str,
+          x: int, y: int, name: str | None = None,
+          description: str | None = None, purpose: str | None = None) -> dict:
+    """Raise a structure on the agent's claimed land. Bible §6.
+
+    Functional kinds (furnace/mill/shelter) have fixed material + AP costs;
+    any other kind is flavor (5 timber + 5 AP — documented judgment call).
+    One structure per tile; land only; the builder must hold the claim.
+    Atomic: AP + materials + structure row commit together.
+    """
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        st = _regen(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        if not isinstance(kind, str) or not kind.strip():
+            raise BuildError("kind must be a non-empty string")
+        kind = kind.strip().lower()
+        if kind in STRUCTURE_DEFS:
+            inputs, ap_cost = STRUCTURE_DEFS[kind]
+        else:
+            inputs, ap_cost = FLAVOR_STRUCTURE_INPUTS, FLAVOR_STRUCTURE_AP
+        terrain = _tile_terrain(conn, x, y)
+        if terrain is None:
+            raise BuildError("no such tile")
+        if terrain == "ocean":
+            raise BuildError("cannot build on ocean")
+        if (
+            conn.execute(
+                "SELECT 1 FROM structures WHERE x = ? AND y = ?", (x, y)
+            ).fetchone()
+            is not None
+        ):
+            raise BuildError("tile already has a structure")
+        if (
+            conn.execute(
+                "SELECT 1 FROM claims WHERE x = ? AND y = ? AND owner_pubkey = ?",
+                (x, y, pubkey),
+            ).fetchone()
+            is None
+        ):
+            raise BuildError("not your claimed land")
+        if st["ap"] < ap_cost:
+            raise InsufficientAP(st["ap"], ap_cost)
+        _consume_materials(conn, pubkey, dict(inputs))
+        new_ap = st["ap"] - ap_cost
+        conn.execute(
+            "UPDATE agent_world SET ap = ?, last_update = ? WHERE agent_id = ?",
+            (float(new_ap), now_ts, agent_id),
+        )
+        cur = conn.execute(
+            "INSERT INTO structures (owner_pubkey, kind, x, y, name,"
+            " description, purpose, raised_at, last_tithe_week,"
+            " settlement_asset) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            (
+                pubkey, kind, x, y, name, description, purpose,
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
+                _tithe_week(now_ts),
+            ),
+        )
+        conn.commit()
+        return {
+            "id": cur.lastrowid,
+            "kind": kind,
+            "x": x,
+            "y": y,
+            "ap": new_ap,
+        }
+    finally:
+        conn.close()
+
+
+def refine(connect, agent_id: int, now_ts: float, item: str) -> dict:
+    """Refine one unit of a refined good. Bible §5.
+
+    Requires an owned furnace; consumes the recipe's raw inputs + AP;
+    produces exactly 1 unit into inventory (per-item cap applies).
+    """
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        st = _regen(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        recipe = REFINERY_RECIPES.get(item)
+        if recipe is None:
+            raise RefineError(f"unknown refinery recipe {item!r}")
+        inputs, ap_cost = recipe
+        if (
+            conn.execute(
+                "SELECT 1 FROM structures WHERE owner_pubkey = ?"
+                " AND kind = 'furnace' LIMIT 1",
+                (pubkey,),
+            ).fetchone()
+            is None
+        ):
+            raise RefineError("refining requires an owned furnace")
+        if st["ap"] < ap_cost:
+            raise InsufficientAP(st["ap"], ap_cost)
+        inv = conn.execute(
+            "SELECT qty FROM inventories WHERE agent_pubkey = ? AND resource = ?",
+            (pubkey, item),
+        ).fetchone()
+        have = int(inv["qty"]) if inv is not None else 0
+        if have + 1 > inventory_cap(conn, pubkey):
+            raise InventoryFull(item)
+        _consume_materials(conn, pubkey, dict(inputs))
+        new_ap = st["ap"] - ap_cost
+        conn.execute(
+            "UPDATE agent_world SET ap = ?, last_update = ? WHERE agent_id = ?",
+            (float(new_ap), now_ts, agent_id),
+        )
+        conn.execute(
+            "INSERT INTO inventories (agent_pubkey, resource, qty) VALUES (?, ?, 1)"
+            " ON CONFLICT(agent_pubkey, resource) DO UPDATE SET qty = qty + 1",
+            (pubkey, item),
+        )
+        conn.commit()
+        return {"item": item, "gained": 1, "ap": new_ap}
+    finally:
+        conn.close()
+
+
 def list_recipes(connect) -> dict:
     """Public recipe book: discovered recipes with inventor credit, plus the
     count of still-hidden ones. Bible §4.2 — the carving is public."""
@@ -1326,6 +1543,27 @@ def list_recipes(connect) -> dict:
         }
     finally:
         conn.close()
+
+
+class ClaimError(WorldError):
+    status_code = 400
+
+    def __init__(self, detail: str = "claim failed"):
+        super().__init__(detail)
+
+
+class BuildError(WorldError):
+    status_code = 400
+
+    def __init__(self, detail: str = "build failed"):
+        super().__init__(detail)
+
+
+class RefineError(WorldError):
+    status_code = 400
+
+    def __init__(self, detail: str = "refine failed"):
+        super().__init__(detail)
 
 
 class InvalidExperiment(WorldError):

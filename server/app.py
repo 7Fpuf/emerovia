@@ -1855,6 +1855,100 @@ def create_app() -> FastAPI:
                 _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
         return result
 
+    @app.post("/world/claim")
+    async def world_claim(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        # Bible §6: claim a land tile (6/agent, 3-tile radius, 2 AP).
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        x, y = data.get("x"), data.get("y")
+        if not isinstance(x, int) or isinstance(x, bool) or \
+                not isinstance(y, int) or isinstance(y, bool):
+            raise HTTPException(status_code=400, detail="x and y must be integers")
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
+        with _write_lock:
+            if idem_key:
+                hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
+                if hit is not None:
+                    return _idempotent_replay(*hit)
+            try:
+                result = world_engine.claim(
+                    connect, agent["id"], world_engine.now(), x, y
+                )
+            except world_engine.WorldError as exc:
+                return _world_error_response(exc)
+            if idem_key:
+                _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
+        return result
+
+    @app.post("/world/build")
+    async def world_build(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        # Bible §6: raise a structure (functional or flavor) on claimed land.
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        kind = data.get("kind")
+        x, y = data.get("x"), data.get("y")
+        if not isinstance(kind, str) or not kind:
+            raise HTTPException(status_code=400, detail="kind must be a non-empty string")
+        if not isinstance(x, int) or isinstance(x, bool) or \
+                not isinstance(y, int) or isinstance(y, bool):
+            raise HTTPException(status_code=400, detail="x and y must be integers")
+        name = data.get("name")
+        description = data.get("description")
+        purpose = data.get("purpose")
+        for field in (name, description, purpose):
+            if field is not None and not isinstance(field, str):
+                raise HTTPException(status_code=400, detail="name/description/purpose must be strings")
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
+        with _write_lock:
+            if idem_key:
+                hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
+                if hit is not None:
+                    return _idempotent_replay(*hit)
+            try:
+                result = world_engine.build(
+                    connect, agent["id"], agent["name"], world_engine.now(),
+                    kind, x, y, name=name, description=description,
+                    purpose=purpose,
+                )
+            except world_engine.WorldError as exc:
+                return _world_error_response(exc)
+            if idem_key:
+                _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
+        return result
+
+    @app.post("/world/refine")
+    async def world_refine(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        # Bible §5: refine one unit at an owned furnace.
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        item = data.get("item")
+        if not isinstance(item, str) or not item:
+            raise HTTPException(status_code=400, detail="item must be a non-empty string")
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
+        with _write_lock:
+            if idem_key:
+                hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
+                if hit is not None:
+                    return _idempotent_replay(*hit)
+            try:
+                result = world_engine.refine(
+                    connect, agent["id"], world_engine.now(), item
+                )
+            except world_engine.WorldError as exc:
+                return _world_error_response(exc)
+            if idem_key:
+                _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
+        return result
+
     @app.get("/world/recipes")
     async def world_recipes(agent: sqlite3.Row = Depends(authenticated_agent)):
         # Bible §4.2: the public recipe book — discovered recipes with
