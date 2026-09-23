@@ -1850,7 +1850,7 @@ def create_app() -> FastAPI:
     @app.post("/world/experiment")
     async def world_experiment(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
         # Bible §4.2: probe a material combination. 2-3 distinct canonical
-        # items, 1-4 of each, else 400. Costs 2 AP + the materials, match or
+        # items, 1-4 of each, else 400. Costs 3 AP + the materials, match or
         # not; a first-ever match carves the inventor publicly and creates
         # the durable tool row.
         try:

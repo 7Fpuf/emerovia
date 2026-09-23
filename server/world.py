@@ -141,11 +141,14 @@ BOUNTY_TOOL_FOR_RESOURCE = {
     "grain": "grain_bounty",
     "glass": "glass_bounty",
 }
-# AP costs. Crude costs come from CRUDE_RECIPES; a hidden-recipe craft costs
-# 5 AP (Bible §4.1 leaves discovered craft AP unspecified — judgment call,
-# documented); an experiment costs 2 AP plus its materials.
+# AP costs. Crude costs come from CRUDE_RECIPES. The Bible (§8, §11) pins
+# EXPERIMENT_COST_AP=3 but is SILENT on the AP cost of crafting a tool
+# from a discovered hidden recipe — DISCOVERED_CRAFT_AP=5 is a judgment
+# call (flagged as interpretation, not Bible-derived): crude crafts cost
+# 2-3 AP and discovered tools are better (300 durability), so 5 AP keeps
+# discovery meaningful without pricing re-crafts out of reach.
 DISCOVERED_CRAFT_AP = 5
-EXPERIMENT_AP = 2
+EXPERIMENT_AP = 3
 RECIPE_DISCOVERY_SEED = "emerovia-discovery-v1"
 
 # ---- Bible §5 — refining + §6 buildings -------------------------------------
@@ -1427,11 +1430,12 @@ def experiment(connect, agent_id: int, agent_name: str, now_ts: float,
     """Probe a material combination for a hidden recipe. Bible §4.2.
 
     The combination must use 2-3 distinct canonical items, 1-4 of each —
-    anything else is 400. Every experiment costs 2 AP and consumes the
-    submitted materials, match or not. A first-ever match carves the
-    inventor publicly (name + pubkey + timestamp, forever) and creates the
-    durable tool row; a later match just creates the tool row; a non-match
-    reports cleanly with no discovery.
+    anything else is 400. Every experiment costs 3 AP (Bible §11
+    EXPERIMENT_COST_AP) and consumes the submitted materials, match or
+    not. A first-ever match carves the inventor publicly (name + pubkey +
+    timestamp, forever) and creates the durable tool row; a later match
+    just creates the tool row; a non-match reports cleanly with no
+    discovery.
     """
     conn = connect()
     try:

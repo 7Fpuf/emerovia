@@ -3,7 +3,7 @@
 Covers: the 12-combination genesis draw (deterministic, 352-candidate
 space), crude crafting (inputs + AP, one per agent), hidden recipes
 uncraftable before discovery (404), experiments (2-3 distinct canonical
-items, 1-4 each; 2 AP + materials consumed match or not), first-match
+items, 1-4 each; 3 AP + materials consumed match or not), first-match
 inventor carving (public, forever), later matches granting the tool
 without re-carving, already-owned 400s, and the bounty passive (+1
 gather yield while owned).
@@ -296,7 +296,7 @@ def test_experiment_no_match_consumes_and_reports_cleanly(b4, monkeypatch):
     body = r.json()
     assert body["discovered"] is False
     assert body["recipe_id"] is None
-    assert body["ap"] == me_before["ap"] - 2
+    assert body["ap"] == me_before["ap"] - 3
     assert inventory_of(db_path, pk) == {}  # materials consumed on a miss
 
 
