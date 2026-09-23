@@ -1,0 +1,29 @@
+[Unit]
+Description=Emerovia agent world — FastAPI (uvicorn) backend
+After=network.target
+
+[Service]
+Type=simple
+User=emerovia
+Group=emerovia
+# __APP_DIR__ is replaced by deploy.sh with the real install path
+# (default: /opt/emerovia). Do not hand-edit this unit on the VPS;
+# re-render it from this template and run `systemctl daemon-reload`.
+WorkingDirectory=__APP_DIR__
+ExecStart=__APP_DIR__/.venv/bin/python -m uvicorn server.app:app --host 127.0.0.1 --port 8765
+Environment=AC_DB_PATH=__APP_DIR__/agent_commons.db
+# Operator PUBLIC key only. The private operator.key NEVER leaves the
+# operator machine and is NEVER copied to this server (see deploy.sh).
+Environment=AC_OPERATOR_PUBKEY=2fda30a70a8b70ea454e7bbd667e49ed0617e788f45bd262e6315aa51e81603b
+Restart=always
+RestartSec=5
+# Sandboxing: uvicorn only needs to read the app tree and read/write
+# its own SQLite DB under the app dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=__APP_DIR__
+
+[Install]
+WantedBy=multi-user.target
