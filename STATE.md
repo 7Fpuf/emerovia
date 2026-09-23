@@ -129,3 +129,16 @@ Updated by the builder loop. Newest entries at the bottom.
 - **Live migration verified** on agent_commons.db: tables created, 3,123 stock rows (4096−973 ocean), all 6 existing agents backfilled to 100 chits, 0 rows altered otherwise. Server restarted via scripts/launch.sh (stopped old pre-change PID via pidfile only — never pkill/session kill; new PID serves new code, localhost-only).
 - **Live smoke** (2 temp agents, localhost): register→100 chits, spawn, gather glass on desert (stock 6→5), offer 1 glass for 5 chits → accept filled; ledger + /stats/economy correct; inventories swapped (105/95 chits, glass moved). All temp rows deleted afterward (agents, inventories, balances, offers, ledger, rate limits) + the 1 gathered glass unit restored to seed value — live DB back to pre-work state (6 agents, 14 msgs, 3 proposals, stock 23,340).
 - Deliberately left out: no regrow mechanic (scarcity permanent by design), no public inventories (private by design), no direct chit transfers (by design), no offer expiry (not in spec).
+
+## 2026-09-23 ~11:55 CDT — Stage 4 independently verified (Mini)
+- Ran full suite myself: **97/97 pass** (70 pre-existing + 27 test_stage4), 18.65s.
+- Live spot-checks on 127.0.0.1:8765: /health ok (6 agents, 14 msgs, 3 proposals — pristine, no temp rows); /stats/economy live with total_stock_remaining=23,340; /trade/ledger + /trade/offers empty as expected; DB shows 3,123 stock rows and all 6 agents at 100 chits.
+- No code fixes needed; worker's implementation accepted as-is. Chits policy (valueless, non-redeemable, offer-only movement) confirmed in docs + code — no token/money boundary crossed.
+- Next: Stage 4 report template stays blank until independent agents trade — requires launch/outreach (Trevor-gated).
+
+## 2026-09-23 ~12:07 CDT — Legacy goal folded into Emerovia (Trevor: "Fold it in")
+- Closed `goal_cbcd7f7d6f4b` ("Launch an open game world for AI agents with a Solana currency", formerly Agentia/AGIA).
+- Salvaged into `docs/legacy/`: `world-design-notes.md` (region-graph model, livelihoods, skills, factions/karma, death rules, 36-action catalog), `api-onboarding-notes.md` (API sketch, MCP option, llms.txt onboarding, SDK/archetypes, trust & safety), `outreach-playbook.md` (positioning, personas, voice, good-citizenship rules, Moltbook beachhead, metrics — rebranded, gate corrected to Trevor), `tokenomics-reference.md` (faucet/sink model, quest thermostat, 5-layer anti-sybil, allocation, circuit breakers — marked SUPERSEDED/reference-only), plus `FOLD_IN.md` record.
+- Left behind: AGIA identity/ticker, devnet token attempt (historical only), Solana-wallet identity (Emerovia uses Ed25519), phase-2 prototype code (superseded), "seed house agents" (conflicts with no-fake-population rule).
+- Source archive retained at `~/workspace/goals/launch-an-open-game-world-for-ai-agents-with-a-solana-currency/`.
+- Observer UI upgrade (world wire ticker, reveal streaks, records, fireworks, chat pings) pushed to public GitHub `7Fpuf/emerovia` main (commit b92bd486a1fa) via transient Trevor-supplied token; token to be deleted by Trevor.
