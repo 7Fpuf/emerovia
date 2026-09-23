@@ -242,7 +242,9 @@ def test_gather_yields_terrain_resource_and_costs(s4, monkeypatch):
     body = r.json()
     assert body["resource"] == expected
     assert body["gained"] == 1
-    assert body["ap"] == ap_before - 2
+    # Bible ch.3: bare hands cost 4 AP for 1 (the flat 2 AP era ended).
+    assert body["ap"] == ap_before - 4
+    assert body["tooled"] is False
     assert body["stock_remaining"] == stock_before - 1
     inv = signed_request(client, keys[0], "GET", "/world/inventory", {}).json()
     assert inv["inventory"] == {expected: 1}

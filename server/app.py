@@ -170,6 +170,140 @@ CREATE TABLE IF NOT EXISTS tile_regrow(
   last_touch REAL NOT NULL,
   PRIMARY KEY(x, y, resource)
 );
+-- Bible v1.2.0 ch.3+ (tools + durability, crafting + discovery): durable
+-- effect-bearers, NOT inventory (non-tradable, non-transferable, passive
+-- while owned, one per recipe per agent). Row deleted at 0 durability.
+CREATE TABLE IF NOT EXISTS tools(
+  agent_pubkey TEXT NOT NULL,
+  recipe_id TEXT NOT NULL,
+  durability INTEGER NOT NULL,
+  max_durability INTEGER NOT NULL,
+  crafted_at TEXT NOT NULL,
+  PRIMARY KEY(agent_pubkey, recipe_id)
+);
+-- Bible v1.2.0 ch.5 (buildings): land claims (max 6/agent) and structures.
+-- One structure per tile. last_tithe_week = last 7-day tithe week paid
+-- (upkeep, ch.8); settlement_asset flags collective-raise ownership.
+CREATE TABLE IF NOT EXISTS claims(
+  x INTEGER NOT NULL,
+  y INTEGER NOT NULL,
+  owner_pubkey TEXT NOT NULL,
+  claimed_at TEXT NOT NULL,
+  PRIMARY KEY(x, y)
+);
+CREATE TABLE IF NOT EXISTS structures(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_pubkey TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  x INTEGER NOT NULL,
+  y INTEGER NOT NULL,
+  name TEXT,
+  description TEXT,
+  purpose TEXT,
+  raised_at TEXT NOT NULL,
+  last_tithe_week INTEGER NOT NULL,
+  settlement_asset INTEGER NOT NULL DEFAULT 0
+);
+-- Bible v1.2.0 ch.7 (farming): 4 crop slots per farm. state in
+-- (untilled, tilled, growing, ready). ready_at is a REAL unix timestamp:
+-- growth needs no ticks — harvest is a pure comparison.
+CREATE TABLE IF NOT EXISTS farm_plots(
+  structure_id INTEGER NOT NULL,
+  slot INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  planted_at REAL,
+  ready_at REAL,
+  tended INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(structure_id, slot)
+);
+-- Bible v1.2.0 ch.10 (sustenance): daily eat allowances per food (UTC day).
+CREATE TABLE IF NOT EXISTS eat_log(
+  agent_pubkey TEXT NOT NULL,
+  item TEXT NOT NULL,
+  day TEXT NOT NULL,
+  qty INTEGER NOT NULL,
+  PRIMARY KEY(agent_pubkey, item, day)
+);
+-- Bible v1.2.0 ch.9 (settlements): feast AP-cap buffs, one active at a time
+-- (non-stacking — a new feast replaces the running buff).
+CREATE TABLE IF NOT EXISTS feast_buffs(
+  agent_pubkey TEXT NOT NULL PRIMARY KEY,
+  settlement_id INTEGER NOT NULL,
+  granted_at REAL NOT NULL,
+  expires_at REAL NOT NULL
+);
+-- Bible v1.2.0 ch.9 (settlements): formation, stewards (distinct owners at
+-- formation), shared treasury, two-steward disbursements, public ledger,
+-- collective build projects with escrow-like contribution holding.
+CREATE TABLE IF NOT EXISTS settlements(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT,
+  center_x INTEGER NOT NULL,
+  center_y INTEGER NOT NULL,
+  formed_at REAL NOT NULL,
+  named_at REAL,
+  named_by TEXT
+);
+CREATE TABLE IF NOT EXISTS settlement_stewards(
+  settlement_id INTEGER NOT NULL,
+  agent_pubkey TEXT NOT NULL,
+  PRIMARY KEY(settlement_id, agent_pubkey)
+);
+CREATE TABLE IF NOT EXISTS settlement_treasury(
+  settlement_id INTEGER NOT NULL,
+  item TEXT NOT NULL,
+  qty INTEGER NOT NULL,
+  PRIMARY KEY(settlement_id, item)
+);
+CREATE TABLE IF NOT EXISTS settlement_disbursals(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  settlement_id INTEGER NOT NULL,
+  to_pubkey TEXT NOT NULL,
+  item TEXT NOT NULL,
+  qty INTEGER NOT NULL,
+  proposed_by TEXT NOT NULL,
+  approved_by TEXT,
+  proposed_at REAL NOT NULL,
+  status TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settlement_ledger(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  settlement_id INTEGER NOT NULL,
+  ts TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  actor_pubkey TEXT NOT NULL,
+  item TEXT,
+  qty INTEGER,
+  detail TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settlement_projects(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  settlement_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  x INTEGER NOT NULL,
+  y INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  completed_at REAL
+);
+CREATE TABLE IF NOT EXISTS project_contributions(
+  project_id INTEGER NOT NULL,
+  agent_pubkey TEXT NOT NULL,
+  item TEXT NOT NULL,
+  qty INTEGER NOT NULL,
+  PRIMARY KEY(project_id, agent_pubkey, item)
+);
+-- Bible v1.2.0 ch.4 (discovery): the 12 hidden recipes, genesis-drawn.
+-- inventor_* are NULL until the first agent discovers the combination —
+-- then the discovery is carved publicly, forever.
+CREATE TABLE IF NOT EXISTS recipes_hidden(
+  recipe_id TEXT NOT NULL PRIMARY KEY,
+  inputs_json TEXT NOT NULL,
+  effect_json TEXT NOT NULL,
+  inventor_pubkey TEXT,
+  inventor_name TEXT,
+  discovered_at TEXT
+);
 -- Append-only trade ledger: no DELETE endpoint, no code path removes rows.
 CREATE TABLE IF NOT EXISTS trade_ledger(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1625,7 +1759,7 @@ def create_app() -> FastAPI:
     async def world_gather(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
         # Bible §2.4: optional {resource}. Omitted + one resource present →
         # that one (backward compatible); omitted + two present → 400 naming
-        # both. (Tool selection lands in the tools chapter.)
+        # both. Bible §4.1: optional {tool} (a recipe_id).
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -1633,6 +1767,9 @@ def create_app() -> FastAPI:
         resource = data.get("resource")
         if resource is not None and not isinstance(resource, str):
             raise HTTPException(status_code=400, detail="resource must be a string")
+        tool = data.get("tool")
+        if tool is not None and not isinstance(tool, str):
+            raise HTTPException(status_code=400, detail="tool must be a string")
         idem_key = _idempotency_key_from(request)
         endpoint = f"{request.method} {request.url.path}"
         with _write_lock:
@@ -1648,7 +1785,8 @@ def create_app() -> FastAPI:
                 conn.close()
             try:
                 result = world_engine.gather(
-                    connect, agent["id"], world_engine.now(), resource=resource
+                    connect, agent["id"], world_engine.now(),
+                    resource=resource, tool=tool,
                 )
             except world_engine.WorldError as exc:
                 return _world_error_response(exc)

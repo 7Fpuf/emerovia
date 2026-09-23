@@ -58,6 +58,37 @@ GATHERABLE_RESOURCES = RAW_RESOURCES + ("glass",)
 # Bible §2.1 refined: made at the furnace, never gathered.
 REFINED_RESOURCES = ("lumber", "iron", "copper", "glass", "flour", "brick")
 ALL_RESOURCES = RAW_RESOURCES + REFINED_RESOURCES
+
+# ---- Bible §4.1 — crude tool crafting --------------------------------------
+# Known on day one. Crafted once per agent (recraft after break); dedicated
+# tool rows (never inventory, never traded).
+CRUDE_RECIPES = {
+    # recipe_id: (inputs, ap_cost)
+    "crude_axe":    ({"timber": 2, "fiber": 1}, 2),
+    "crude_pick":   ({"timber": 2, "iron_ore": 2}, 3),
+    "crude_sickle": ({"timber": 2, "grain": 1, "fiber": 1}, 2),
+    "crude_sieve":  ({"timber": 3, "fiber": 1}, 3),
+}
+# Which wild resources each tool works on. The crude pick also works the
+# legacy desert glass veins (§2.4 ruling 1); refined glass is never gathered.
+TOOL_COVERAGE = {
+    "crude_axe":    ("timber",),
+    "crude_pick":   ("stone", "iron_ore", "copper_ore", "coal", "clay", "glass"),
+    "crude_sickle": ("grain", "fruit", "fiber", "herbs"),
+    "crude_sieve":  ("sand",),
+}
+TOOL_DURABILITY_CRUDE = 120
+TOOL_DURABILITY_DISCOVERED = 300
+
+# Gather modes (§3.1 / §4.1): bare hands cost 4 AP for 1; a matching tool
+# costs 2 AP for 2. GATHER_COST is the legacy alias kept for compatibility.
+GATHER_BARE_AP = 4
+GATHER_BARE_YIELD = 1
+GATHER_TOOLED_AP = 2
+GATHER_TOOLED_YIELD = 2
+# Season adjustment applies to the tooled yield only (§11). The season clock
+# itself lands in ch.11; until then this returns 0.
+SEASON_GATHER_ADJ = {"spring": 0, "summer": 1, "autumn": 0, "winter": -1}
 # Chits are simulation credits (see server/app.py): valueless, transferable
 # only inside trade offers, never redeemable.
 CHITS_ITEM = "chits"
@@ -261,6 +292,20 @@ class NothingToGather(WorldError):
         super().__init__(detail)
 
 
+class UnknownTool(WorldError):
+    status_code = 400
+
+    def __init__(self, detail: str = "unknown tool"):
+        super().__init__(detail)
+
+
+class ToolNotOwned(WorldError):
+    status_code = 400
+
+    def __init__(self, detail: str = "tool not owned"):
+        super().__init__(detail)
+
+
 class TileDepleted(WorldError):
     status_code = 400
 
@@ -330,9 +375,13 @@ def _regen(conn: sqlite3.Connection, agent_id: int, now_ts: float) -> dict:
         raise NotSpawned()
     ap = int(row["ap"])
     last = float(row["last_update"])
-    new_ap = ap_after_regen(ap, AP_CAP, last, now_ts)
+    pubkey = conn.execute(
+        "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+    ).fetchone()["pubkey"]
+    cap = effective_ap_cap(conn, agent_id, pubkey, now_ts)
+    new_ap = ap_after_regen(ap, cap, last, now_ts)
     elapsed = max(0.0, now_ts - last)
-    if new_ap >= AP_CAP:
+    if new_ap >= cap:
         seconds_until_next_ap = 0
     else:
         rem = elapsed % AP_REGEN_SECONDS
@@ -583,6 +632,136 @@ def _resolve_gather_resource(
     return resource
 
 
+def _owns_tool(conn: sqlite3.Connection, pubkey: str, recipe_id: str) -> bool:
+    """Dedicated tool rows: presence in tools = owned (passive effects)."""
+    conn.row_factory = sqlite3.Row
+    return (
+        conn.execute(
+            "SELECT 1 FROM tools WHERE agent_pubkey = ? AND recipe_id = ?",
+            (pubkey, recipe_id),
+        ).fetchone()
+        is not None
+    )
+
+
+def inventory_cap(conn: sqlite3.Connection, pubkey: str) -> int:
+    """Effective per-item inventory cap: 149 with a cart tool, else 99 (§4.2)."""
+    return 149 if _owns_tool(conn, pubkey, "cart") else 99
+
+
+def effective_ap_cap(conn: sqlite3.Connection, agent_id: int, pubkey: str,
+                     now_ts: float) -> int:
+    """AP cap: 100 base +10 active shelter +10 ap_boon +10 active feast (§8/§9).
+
+    Shelters exist from ch.5; derelict filtering lands with upkeep in ch.8.
+    ap_boon (ch.4) and feast buffs (ch.9) have no rows until those chapters.
+    """
+    conn.row_factory = sqlite3.Row
+    cap = AP_CAP
+    if (
+        conn.execute(
+            "SELECT 1 FROM structures WHERE owner_pubkey = ? AND kind = 'shelter'"
+            " LIMIT 1",
+            (pubkey,),
+        ).fetchone()
+        is not None
+    ):
+        cap += 10
+    if _owns_tool(conn, pubkey, "ap_boon"):
+        cap += 10
+    if (
+        conn.execute(
+            "SELECT 1 FROM feast_buffs WHERE agent_pubkey = ? AND expires_at > ?",
+            (pubkey, now_ts),
+        ).fetchone()
+        is not None
+    ):
+        cap += 10
+    return cap
+
+
+def _resolve_gather_tool(conn: sqlite3.Connection, pubkey: str,
+                         tool: str | None, resource: str) -> str | None:
+    """Pick the tool recipe_id for a gather, or None for bare hands (§4.1).
+
+    Explicit unknown recipe_id → 400. Owned-but-not-covering → bare hands
+    (the tool is NOT worn). A passive discovered tool named explicitly has
+    no coverage, so it also falls back to bare hands. Omitted → the covering
+    owned tool with the highest durability (ties: lowest recipe_id).
+    """
+    conn.row_factory = sqlite3.Row
+    if tool is not None:
+        if tool not in TOOL_COVERAGE:
+            if tool not in CRUDE_RECIPES and not _owns_tool(conn, pubkey, tool):
+                raise UnknownTool(f"unknown tool {tool!r}")
+            return None
+        row = conn.execute(
+            "SELECT durability FROM tools WHERE agent_pubkey = ? AND recipe_id = ?",
+            (pubkey, tool),
+        ).fetchone()
+        if row is None:
+            raise ToolNotOwned(f"tool not owned: {tool!r}")
+        if resource not in TOOL_COVERAGE[tool]:
+            return None  # mismatched tool: bare hands, no wear
+        return tool
+    best: tuple[int, str] | None = None
+    for tool_id, covers in TOOL_COVERAGE.items():
+        if resource not in covers:
+            continue
+        row = conn.execute(
+            "SELECT durability FROM tools WHERE agent_pubkey = ? AND recipe_id = ?",
+            (pubkey, tool_id),
+        ).fetchone()
+        if row is None:
+            continue
+        cand = (int(row["durability"]), tool_id)
+        if best is None or cand[0] > best[0] or (cand[0] == best[0] and cand[1] < best[1]):
+            best = cand
+    return best[1] if best else None
+
+
+def _wear_tool(conn: sqlite3.Connection, pubkey: str, tool_id: str) -> bool:
+    """Wear one durability off a tool; delete the row at 0 (§4.1).
+
+    Returns True when the tool broke on this gather (the gather itself is
+    still valid). Row-count guard keeps it atomic under concurrency.
+    """
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "UPDATE tools SET durability = durability - 1"
+        " WHERE agent_pubkey = ? AND recipe_id = ? AND durability > 0"
+        " RETURNING durability",
+        (pubkey, tool_id),
+    ).fetchone()
+    if row is None:
+        return True  # raced to zero — treat as broken; shouldn't happen
+    if int(row["durability"]) <= 0:
+        conn.execute(
+            "DELETE FROM tools WHERE agent_pubkey = ? AND recipe_id = ?",
+            (pubkey, tool_id),
+        )
+        return True
+    return False
+
+
+def _season_gather_adj(now_ts: float) -> int:
+    """Tooled-yield season adjustment (§11). Stub until the ch.11 season clock."""
+    return 0
+
+
+def _gather_yield(conn: sqlite3.Connection, pubkey: str, resource: str,
+                  tooled: bool, now_ts: float) -> int:
+    """Units per gather before the stock clamp.
+
+    Bare hands: flat 1. Tooled: 2 + season adj (tooled only). Mill timber
+    +1 (ch.5) and discovered bounty passives (ch.4) extend this function
+    when those chapters land.
+    """
+    if not tooled:
+        return GATHER_BARE_YIELD
+    return max(1, GATHER_TOOLED_YIELD + _season_gather_adj(now_ts))
+
+
 def _seeded_max(x: int, y: int, resource: str) -> int:
     """Regrow cap: the seeded max for a (tile, resource) stock row.
 
@@ -656,67 +835,80 @@ def gather(
     agent_id: int,
     now_ts: float,
     resource: str | None = None,
+    tool: str | None = None,
 ) -> dict:
-    """Gather 1 unit of the resource on the agent's current tile.
+    """Gather wild resources. Bible §3.1 + §4.1.
 
-    Bible §2.4: ``resource`` is optional — omitted with one resource present
-    gathers that one; omitted with two present → 400 ``specify resource``.
+    Bare hands: 4 AP → 1 unit. A matching tool: 2 AP → 2 units. The optional
+    ``tool`` is a recipe_id — unknown → 400; owned but mismatched → bare
+    hands (the tool is NOT worn); omitted → the covering tool with the
+    highest durability (ties: lowest recipe_id). Each gather wears the used
+    tool 1 durability; at 0 the tool breaks (row deleted) and the gather
+    stays valid. Regrow (§3.2) applies first, in-transaction.
 
-    Costs 2 AP. Atomic: deducts AP, decrements tile stock, increments
-    inventory in one transaction. Ocean tiles yield nothing (400),
-    depleted tiles refuse (400), per-resource inventory cap is 99 (400),
-    and insufficient AP is 402 — same convention as move/disclose.
-    (Tool gating lands in the tools chapter; this keeps the flat rate.)
-    Regrow (§3.2) is applied before the stock decrement, in-transaction.
+    Atomic: regrow, AP, stock, inventory, and wear commit together.
+    Per-item inventory cap is 99 (149 with a cart, §4.2). Insufficient AP
+    is 402; depleted tiles refuse (400).
     """
     conn = connect()
     try:
         st = _regen(conn, agent_id, now_ts)
         _apply_regrow_tile(conn, st["x"], st["y"], now_ts)
         resource = _resolve_gather_resource(conn, st["x"], st["y"], resource)
-        if st["ap"] < GATHER_COST:
-            raise InsufficientAP(st["ap"], GATHER_COST)
-        inv = conn.execute(
-            "SELECT qty FROM inventories WHERE agent_pubkey ="
-            " (SELECT pubkey FROM agents WHERE id = ?) AND resource = ?",
-            (agent_id, resource),
-        ).fetchone()
-        if inv is not None and int(inv["qty"]) >= INVENTORY_CAP:
-            raise InventoryFull(resource)
         pubkey = conn.execute(
             "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
         ).fetchone()["pubkey"]
-        # Decrement stock only if still positive — atomic scarcity.
-        cur = conn.execute(
-            "UPDATE world_resource_stock SET stock = stock - 1"
-            " WHERE x = ? AND y = ? AND resource = ? AND stock > 0",
+        tool_id = _resolve_gather_tool(conn, pubkey, tool, resource)
+        tooled = tool_id is not None
+        cost = GATHER_TOOLED_AP if tooled else GATHER_BARE_AP
+        if st["ap"] < cost:
+            raise InsufficientAP(st["ap"], cost)
+        take = _gather_yield(conn, pubkey, resource, tooled, now_ts)
+        inv = conn.execute(
+            "SELECT qty FROM inventories WHERE agent_pubkey = ? AND resource = ?",
+            (pubkey, resource),
+        ).fetchone()
+        have = int(inv["qty"]) if inv is not None else 0
+        if have + take > inventory_cap(conn, pubkey):
+            raise InventoryFull(resource)
+        # Clamp the take to what's actually on the tile; the rowcount guard
+        # keeps the decrement atomic under concurrency.
+        before = conn.execute(
+            "SELECT stock FROM world_resource_stock"
+            " WHERE x = ? AND y = ? AND resource = ?",
             (st["x"], st["y"], resource),
+        ).fetchone()["stock"]
+        gained = min(take, int(before))
+        cur = conn.execute(
+            "UPDATE world_resource_stock SET stock = stock - ?"
+            " WHERE x = ? AND y = ? AND resource = ? AND stock >= ?",
+            (gained, st["x"], st["y"], resource, gained),
         )
         if cur.rowcount == 0:
             raise TileDepleted()
-        new_ap = st["ap"] - GATHER_COST
+        tool_broke = _wear_tool(conn, pubkey, tool_id) if tooled else False
+        new_ap = st["ap"] - cost
         conn.execute(
             "UPDATE agent_world SET ap = ?, last_update = ? WHERE agent_id = ?",
             (float(new_ap), now_ts, agent_id),
         )
         conn.execute(
             "INSERT INTO inventories (agent_pubkey, resource, qty)"
-            " VALUES (?, ?, 1)"
-            " ON CONFLICT(agent_pubkey, resource) DO UPDATE SET qty = qty + 1",
-            (pubkey, resource),
+            " VALUES (?, ?, ?)"
+            " ON CONFLICT(agent_pubkey, resource) DO UPDATE SET qty = qty + ?",
+            (pubkey, resource, gained, gained),
         )
-        stock = conn.execute(
-            "SELECT stock FROM world_resource_stock WHERE x = ? AND y = ? AND resource = ?",
-            (st["x"], st["y"], resource),
-        ).fetchone()["stock"]
         conn.commit()
         return {
             "resource": resource,
-            "gained": 1,
-            "stock_remaining": int(stock),
+            "gained": gained,
+            "stock_remaining": int(before) - gained,
             "ap": new_ap,
             "x": st["x"],
             "y": st["y"],
+            "tool": tool_id,
+            "tooled": tooled,
+            "tool_broke": tool_broke,
         }
     finally:
         conn.close()
@@ -804,6 +996,17 @@ def me_view(connect, agent_id: int, agent_name: str, now_ts: float) -> dict:
         st = _regen(conn, agent_id, now_ts)
         conn.commit()
         terrain = _tile_terrain(conn, st["x"], st["y"])
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        tools = [
+            r["recipe_id"]
+            for r in conn.execute(
+                "SELECT recipe_id, durability, max_durability FROM tools"
+                " WHERE agent_pubkey = ? ORDER BY recipe_id",
+                (pubkey,),
+            ).fetchall()
+        ]
         count = conn.execute(
             "SELECT COUNT(*) FROM discoveries WHERE agent_id = ?", (agent_id,)
         ).fetchone()[0]
@@ -819,8 +1022,12 @@ def me_view(connect, agent_id: int, agent_name: str, now_ts: float) -> dict:
             "y": st["y"],
             "terrain": terrain,
             "ap": st["ap"],
-            "ap_cap": AP_CAP,
+            # Bible ch.3: effective AP cap (100 +10 shelter +10 ap_boon
+            # +10 feast). Fresh agents have no bonuses, so this stays 100.
+            "ap_cap": effective_ap_cap(conn, agent_id, pubkey, now_ts),
             "ap_per_minute": 1,
+            # Bible ch.3: durable tool rows (recipe_ids), worn on gather.
+            "tools": tools,
             "seconds_until_next_ap": st["seconds_until_next_ap"],
             "private_discoveries": count,
             # QA v1.1.0 round 2: additive field (item 11). private_discoveries
