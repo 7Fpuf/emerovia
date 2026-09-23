@@ -2000,13 +2000,15 @@ def _apply_upkeep(conn: sqlite3.Connection, agent_id: int, now_ts: float) -> Non
     """Bible §4.2 entry hook: auto-pay tithe arrears on owned structures.
 
     Called on entry to EVERY world-verb owner mutation (move/gather/
-    craft/experiment/claim/build/demolish/transfer/refine/farm/eat/tithe/
+    craft/experiment/claim/build/demolish/transfer/refine/farm/eat/
     disclose and the settlement verbs), inside the caller's transaction —
     a failed action rolls the tithe payment back with it. Structures the
     agent can't afford stay in arrears and go derelict at 4+ weeks behind.
-    Social/economic verbs (chat, trade, proposals) intentionally do NOT
-    settle upkeep: the hook covers physical world actions per the
-    corrective design (0a2e3ec).
+    The manual /world/tithe payment is deliberately excluded: it IS the
+    tithe settlement, and the hook would auto-pay its arrears first and
+    turn the endpoint into dead code. Social/economic verbs (chat, trade,
+    proposals) intentionally do NOT settle upkeep: the hook covers
+    physical world actions per the corrective design (0a2e3ec).
     """
     conn.row_factory = sqlite3.Row
     pubkey = conn.execute(
@@ -2032,7 +2034,6 @@ def tithe(connect, agent_id: int, now_ts: float, structure_id: int) -> dict:
     try:
         conn.row_factory = sqlite3.Row
         st = _regen(conn, agent_id, now_ts)
-        _apply_upkeep(conn, agent_id, now_ts)
         pubkey = conn.execute(
             "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
         ).fetchone()["pubkey"]

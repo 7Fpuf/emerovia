@@ -507,3 +507,20 @@ def test_custom_structure_pays_timber_tithe(b7, monkeypatch):
     # 2 timber tithed; the gather itself may add timber on forest tiles.
     assert inv.get("timber", 0) == (1 if tterrain == "forest" else 0)
     assert tithe_week_of(db_path, sid) == now_week - 1  # 1 week arrears left
+
+
+def test_disclose_settles_upkeep_hook(b7, monkeypatch):
+    client, keys, db_path, appmod = b7
+    open_buckets(appmod, monkeypatch)
+    spawn(client, keys[0])
+    pk = pubkey_hex(keys[0])
+    sid, me = build_on_own_tile(client, keys, db_path, "shelter")
+    age_structure(db_path, sid, 2)  # 2 weeks x 2 timber owed
+    set_inventory(db_path, pk, {"timber": 4})
+    r = signed_request(client, keys[0], "POST", "/world/disclose",
+                       {"x": me["x"], "y": me["y"]})
+    assert r.status_code == 200, r.text
+    # The entry hook auto-paid the arrears: timber gone, tithe week current.
+    assert inventory_of(db_path, pk).get("timber", 0) == 0
+    import server.world as w
+    assert tithe_week_of(db_path, sid) == w._tithe_week(time.time())
