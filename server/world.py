@@ -1999,11 +1999,14 @@ def _pay_tithe_for_structure(conn: sqlite3.Connection, pubkey: str,
 def _apply_upkeep(conn: sqlite3.Connection, agent_id: int, now_ts: float) -> None:
     """Bible §4.2 entry hook: auto-pay tithe arrears on owned structures.
 
-    Called on entry to EVERY owner mutation (move/gather/craft/
-    experiment/claim/build/refine/farm/eat/tithe and the settlement
-    verbs), inside the caller's transaction — a failed action rolls the
-    tithe payment back with it. Structures the agent can't afford stay in
-    arrears and go derelict at 4+ weeks behind.
+    Called on entry to EVERY world-verb owner mutation (move/gather/
+    craft/experiment/claim/build/demolish/transfer/refine/farm/eat/tithe/
+    disclose and the settlement verbs), inside the caller's transaction —
+    a failed action rolls the tithe payment back with it. Structures the
+    agent can't afford stay in arrears and go derelict at 4+ weeks behind.
+    Social/economic verbs (chat, trade, proposals) intentionally do NOT
+    settle upkeep: the hook covers physical world actions per the
+    corrective design (0a2e3ec).
     """
     conn.row_factory = sqlite3.Row
     pubkey = conn.execute(
@@ -2029,6 +2032,7 @@ def tithe(connect, agent_id: int, now_ts: float, structure_id: int) -> dict:
     try:
         conn.row_factory = sqlite3.Row
         st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
         pubkey = conn.execute(
             "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
         ).fetchone()["pubkey"]
@@ -3122,6 +3126,7 @@ def disclose(connect, agent_id: int, x: int, y: int, now_ts: float) -> dict:
     conn = connect()
     try:
         st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
         disc = conn.execute(
             "SELECT terrain FROM discoveries WHERE agent_id = ? AND x = ? AND y = ?",
             (agent_id, x, y),
@@ -3170,6 +3175,7 @@ def disclose_batch(
     conn = connect()
     try:
         st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
         ap = st["ap"]
         results: list[dict] = []
         disclosed = 0

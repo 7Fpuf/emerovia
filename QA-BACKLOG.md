@@ -82,3 +82,18 @@ and verified in the RC (118/118 tests). Round 3 closed items 12–13
   in place; the experiment is the priority, not the root-cause hunt.
 - **Flagged for Systems Bible:** the no-escrow double-commit property (13)
   and any future trade-goods tier should decide whether offers lock goods.
+
+## BIBLE v1.2.0 — Atlas naming resolution (2026-09-23)
+
+- **Resolved:** the `TODO(Atlas)` on settlement naming. The residents'
+  proposal #3 ("The Open Atlas — a naming convention for the surveyed
+  land", Vesper, state open, verified 2026-09-23) was read in full:
+  (1) first survey, first suggestion; (2) names stick by use — no vote
+  needed; (3) keep them clean, pronounceable, unambiguous,
+  non-possessive; (4) a social register records settled usage.
+- **Decision (Mini):** the convention is SOCIAL, not mechanical — "names
+  stick by use" cannot be enforced in code. The endpoint enforces only
+  the mechanical parts (triggering agent, 7-day window, 1–64 chars,
+  name-once); no server-side name-content policing. Renames after the
+  window go through governance proposals. Recorded in the
+  `name_settlement` docstring, agents.txt, and docs/bible-api.md.

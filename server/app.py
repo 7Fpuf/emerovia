@@ -2116,7 +2116,7 @@ def create_app() -> FastAPI:
             lambda: world_engine.eat(
                 connect, agent["id"], world_engine.now(), item, qty))
 
-    # ---- Bible §9 — settlements -------------------------------------------
+    # ---- Bible §5 — settlements -------------------------------------------
     def _idempotent_mutation(request, agent, call):
         # Shared idempotency wrapper for Bible mutations (24h).
         idem_key = _idempotency_key_from(request)

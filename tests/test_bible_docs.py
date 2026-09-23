@@ -28,15 +28,14 @@ def test_openapi_covers_bible_routes(tmp_path, monkeypatch):
         "/world/refine": ["post"],
         "/world/claim": ["post"],
         "/world/build": ["post"],
+        "/world/demolish": ["post"],
+        "/world/transfer": ["post"],
         "/world/farm": ["post"],
         "/world/tithe": ["post"],
-        "/world/settlements/form": ["post"],
-        "/world/settlements/join": ["post"],
         "/world/settlements/name": ["post"],
         "/world/settlements/contribute": ["post"],
         "/world/settlements/disburse": ["post"],
         "/world/settlements/disburse/approve": ["post"],
-        "/world/settlements/feast": ["post"],
         "/world/settlements/projects": ["post"],
         "/world/settlements/projects/contribute": ["post"],
         "/world/settlements/projects/complete": ["post"],
@@ -48,6 +47,10 @@ def test_openapi_covers_bible_routes(tmp_path, monkeypatch):
         assert path in paths, f"missing from OpenAPI: {path}"
         for method in methods:
             assert method in paths[path], f"{path} missing {method}"
+    # Removed Bible-obsolete routes stay gone.
+    for gone in ("/world/settlements/form", "/world/settlements/join",
+                 "/world/settlements/feast"):
+        assert gone not in paths, f"obsolete route still served: {gone}"
     # Seasons are published in /world/info.
     info = client.get("/world/info").json()
     assert info["seasons"]["season"] in ("spring", "summer", "autumn", "winter")
