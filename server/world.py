@@ -172,10 +172,11 @@ FLAVOR_STRUCTURE_INPUTS = {"timber": 5}
 FLAVOR_STRUCTURE_AP = 5
 BUILDABLE_FUNCTIONAL = ("furnace", "mill", "shelter")
 # Land claims: 6 per agent, claimed within a 3-tile (Chebyshev) radius of
-# the agent, 2 AP per claim action. Claims are permanent (no release).
+# the agent, 5 AP per claim action (Bible §11 CLAIM_COST_AP). Claims are
+# permanent (no release).
 CLAIM_MAX = 6
 CLAIM_RADIUS = 3
-CLAIM_AP = 2
+CLAIM_AP = 5
 
 
 def _tithe_week(now_ts: float) -> int:
@@ -1504,8 +1505,8 @@ def claim(connect, agent_id: int, now_ts: float, x: int, y: int) -> dict:
     """Claim a land tile. Bible §6.
 
     6 claims per agent, land only, unclaimed only, within a 3-tile
-    (Chebyshev) radius of the agent, 2 AP per claim. Claims are permanent.
-    Atomic: AP + claim row commit together.
+    (Chebyshev) radius of the agent, 5 AP per claim (Bible §11).
+    Claims are permanent. Atomic: AP + claim row commit together.
     """
     conn = connect()
     try:

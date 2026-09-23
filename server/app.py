@@ -390,6 +390,17 @@ RATE_LIMITS = {
     "trade_offer": (3, 3600),
     "trade_accept": (10, 60),
     "gather": (1, 2),
+    # Systems Bible §11 RATE_LIMITS (new): claim 1/60s, craft 5/hr,
+    # experiment 1/60s, plant 1/5s, harvest 1/5s, refine 1/5s.
+    # voice 1/2s, shout 1/30s, relay 1/300s are RESERVED bucket names —
+    # the voice/relay systems are not built yet, so no endpoint checks
+    # those buckets (wiring them now would 429 nothing and confuse).
+    "claim": (1, 60),
+    "craft": (5, 3600),
+    "experiment": (1, 60),
+    "plant": (1, 5),
+    "harvest": (1, 5),
+    "refine": (1, 5),
 }
 
 # QA v1.1.0: batch disclose cap — one call discloses at most this many tiles.
@@ -1820,6 +1831,12 @@ def create_app() -> FastAPI:
                 hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
                 if hit is not None:
                     return _idempotent_replay(*hit)
+            conn = connect()
+            try:
+                _check_rate_limit(conn, agent["id"], "craft")
+                conn.commit()
+            finally:
+                conn.close()
             try:
                 result = world_engine.craft(
                     connect, agent["id"], agent["name"], world_engine.now(), recipe_id
@@ -1850,6 +1867,12 @@ def create_app() -> FastAPI:
                 hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
                 if hit is not None:
                     return _idempotent_replay(*hit)
+            conn = connect()
+            try:
+                _check_rate_limit(conn, agent["id"], "experiment")
+                conn.commit()
+            finally:
+                conn.close()
             try:
                 result = world_engine.experiment(
                     connect, agent["id"], agent["name"], world_engine.now(), items
@@ -1862,7 +1885,7 @@ def create_app() -> FastAPI:
 
     @app.post("/world/claim")
     async def world_claim(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
-        # Bible §6: claim a land tile (6/agent, 3-tile radius, 2 AP).
+        # Bible §6: claim a land tile (6/agent, 3-tile radius, 5 AP, 1/60s).
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -1878,6 +1901,12 @@ def create_app() -> FastAPI:
                 hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
                 if hit is not None:
                     return _idempotent_replay(*hit)
+            conn = connect()
+            try:
+                _check_rate_limit(conn, agent["id"], "claim")
+                conn.commit()
+            finally:
+                conn.close()
             try:
                 result = world_engine.claim(
                     connect, agent["id"], world_engine.now(), x, y
@@ -1929,7 +1958,7 @@ def create_app() -> FastAPI:
 
     @app.post("/world/refine")
     async def world_refine(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
-        # Bible §5: refine one unit at an owned furnace.
+        # Bible §5: refine one batch at an owned furnace (1/5s).
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -1944,6 +1973,12 @@ def create_app() -> FastAPI:
                 hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
                 if hit is not None:
                     return _idempotent_replay(*hit)
+            conn = connect()
+            try:
+                _check_rate_limit(conn, agent["id"], "refine")
+                conn.commit()
+            finally:
+                conn.close()
             try:
                 result = world_engine.refine(
                     connect, agent["id"], world_engine.now(), item
