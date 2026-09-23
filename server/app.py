@@ -217,6 +217,10 @@ CREATE TABLE IF NOT EXISTS farm_plots(
   PRIMARY KEY(structure_id, slot)
 );
 -- Bible v1.2.0 ch.10 (sustenance): daily eat allowances per food (UTC day).
+CREATE TABLE IF NOT EXISTS world_meta(
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS eat_log(
   agent_pubkey TEXT NOT NULL,
   item TEXT NOT NULL,
@@ -696,6 +700,7 @@ def create_app() -> FastAPI:
         _configure_db(conn)
         try:
             world_engine.seed_world_if_empty(conn)
+            world_engine.ensure_world_genesis(conn, time.time())
             conn.commit()
         finally:
             conn.close()
@@ -2010,9 +2015,27 @@ def create_app() -> FastAPI:
                 _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
         return result
 
+    # ---- Bible §2.6 — sustenance --------------------------------------------
+    @app.post("/eat")
+    async def eat_food(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        item = data.get("item")
+        qty = data.get("qty")
+        if not isinstance(item, str):
+            raise HTTPException(status_code=400, detail="item must be a string")
+        if not isinstance(qty, int) or isinstance(qty, bool):
+            raise HTTPException(status_code=400, detail="qty must be an integer")
+        return _idempotent_mutation(
+            request, agent,
+            lambda: world_engine.eat(
+                connect, agent["id"], world_engine.now(), item, qty))
+
     # ---- Bible §9 — settlements -------------------------------------------
-    def _settlement_mutation(request, agent, call):
-        # Shared idempotency wrapper for settlement mutations.
+    def _idempotent_mutation(request, agent, call):
+        # Shared idempotency wrapper for Bible mutations (24h).
         idem_key = _idempotency_key_from(request)
         endpoint = f"{request.method} {request.url.path}"
         with _write_lock:
@@ -2038,7 +2061,7 @@ def create_app() -> FastAPI:
         if not isinstance(x, int) or isinstance(x, bool) or \
                 not isinstance(y, int) or isinstance(y, bool):
             raise HTTPException(status_code=400, detail="x and y must be integers")
-        return _settlement_mutation(
+        return _idempotent_mutation(
             request, agent,
             lambda: world_engine.form_settlement(
                 connect, agent["id"], world_engine.now(), x, y))
@@ -2052,7 +2075,7 @@ def create_app() -> FastAPI:
         settlement_id = data.get("settlement_id")
         if not isinstance(settlement_id, int) or isinstance(settlement_id, bool):
             raise HTTPException(status_code=400, detail="settlement_id must be an integer")
-        return _settlement_mutation(
+        return _idempotent_mutation(
             request, agent,
             lambda: world_engine.join_settlement(
                 connect, agent["id"], world_engine.now(), settlement_id))
@@ -2069,7 +2092,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="settlement_id must be an integer")
         if not isinstance(name, str):
             raise HTTPException(status_code=400, detail="name must be a string")
-        return _settlement_mutation(
+        return _idempotent_mutation(
             request, agent,
             lambda: world_engine.name_settlement(
                 connect, agent["id"], agent["name"], world_engine.now(),
@@ -2090,7 +2113,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="item must be a string")
         if not isinstance(qty, int) or isinstance(qty, bool):
             raise HTTPException(status_code=400, detail="qty must be an integer")
-        return _settlement_mutation(
+        return _idempotent_mutation(
             request, agent,
             lambda: world_engine.contribute_settlement(
                 connect, agent["id"], world_engine.now(),
@@ -2114,7 +2137,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="item must be a string")
         if not isinstance(qty, int) or isinstance(qty, bool):
             raise HTTPException(status_code=400, detail="qty must be an integer")
-        return _settlement_mutation(
+        return _idempotent_mutation(
             request, agent,
             lambda: world_engine.disburse_propose(
                 connect, agent["id"], world_engine.now(),
@@ -2129,7 +2152,7 @@ def create_app() -> FastAPI:
         disbursal_id = data.get("disbursal_id")
         if not isinstance(disbursal_id, int) or isinstance(disbursal_id, bool):
             raise HTTPException(status_code=400, detail="disbursal_id must be an integer")
-        return _settlement_mutation(
+        return _idempotent_mutation(
             request, agent,
             lambda: world_engine.disburse_approve(
                 connect, agent["id"], world_engine.now(), disbursal_id))
@@ -2143,7 +2166,7 @@ def create_app() -> FastAPI:
         settlement_id = data.get("settlement_id")
         if not isinstance(settlement_id, int) or isinstance(settlement_id, bool):
             raise HTTPException(status_code=400, detail="settlement_id must be an integer")
-        return _settlement_mutation(
+        return _idempotent_mutation(
             request, agent,
             lambda: world_engine.feast_settlement(
                 connect, agent["id"], world_engine.now(), settlement_id))
@@ -2164,7 +2187,7 @@ def create_app() -> FastAPI:
         if not isinstance(x, int) or isinstance(x, bool) or \
                 not isinstance(y, int) or isinstance(y, bool):
             raise HTTPException(status_code=400, detail="x and y must be integers")
-        return _settlement_mutation(
+        return _idempotent_mutation(
             request, agent,
             lambda: world_engine.project_create(
                 connect, agent["id"], agent["name"], world_engine.now(),
@@ -2185,7 +2208,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="item must be a string")
         if not isinstance(qty, int) or isinstance(qty, bool):
             raise HTTPException(status_code=400, detail="qty must be an integer")
-        return _settlement_mutation(
+        return _idempotent_mutation(
             request, agent,
             lambda: world_engine.project_contribute(
                 connect, agent["id"], world_engine.now(), project_id, item, qty))
@@ -2199,7 +2222,7 @@ def create_app() -> FastAPI:
         project_id = data.get("project_id")
         if not isinstance(project_id, int) or isinstance(project_id, bool):
             raise HTTPException(status_code=400, detail="project_id must be an integer")
-        return _settlement_mutation(
+        return _idempotent_mutation(
             request, agent,
             lambda: world_engine.project_complete(
                 connect, agent["id"], agent["name"], world_engine.now(), project_id))

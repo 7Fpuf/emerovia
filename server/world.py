@@ -90,7 +90,27 @@ GATHER_TOOLED_AP = 2
 GATHER_TOOLED_YIELD = 2
 # Season adjustment applies to the tooled yield only (§11). The season clock
 # itself lands in ch.11; until then this returns 0.
-SEASON_GATHER_ADJ = {"spring": 0, "summer": 1, "autumn": 0, "winter": -1}
+# Bible §7 — seasons. Deterministic rotation of resource abundance.
+# season_index = (days_since_genesis // 14) % 4, Spring → Summer → Autumn → Winter.
+SEASON_DAYS = 14
+SEASON_ORDER = ("spring", "summer", "autumn", "winter")
+# Per-resource abundance multipliers (§7 table). Applied to gather yield:
+# >= 1.25 → +1 on tooled gathers; <= 0.50 → -1 (min 1); bare hands unaffected.
+# Farmed grain is seasonless (farming never consults this table).
+SEASON_MULT = {
+    "timber":   {"spring": 1.25, "summer": 1.00, "autumn": 1.25, "winter": 0.75},
+    "fiber":    {"spring": 1.25, "summer": 1.25, "autumn": 1.00, "winter": 0.75},
+    "grain":    {"spring": 1.25, "summer": 1.25, "autumn": 1.00, "winter": 0.50},
+    "fruit":    {"spring": 0.75, "summer": 1.50, "autumn": 1.25, "winter": 0.25},
+    "herbs":    {"spring": 1.50, "summer": 1.25, "autumn": 1.00, "winter": 0.50},
+    "stone":    {"spring": 1.00, "summer": 1.00, "autumn": 1.00, "winter": 1.00},
+    "iron_ore": {"spring": 1.00, "summer": 1.00, "autumn": 1.00, "winter": 1.00},
+    "copper_ore": {"spring": 1.00, "summer": 1.00, "autumn": 1.00, "winter": 1.00},
+    "sand":     {"spring": 1.00, "summer": 1.00, "autumn": 1.00, "winter": 1.00},
+    "coal":     {"spring": 1.00, "summer": 1.00, "autumn": 1.00, "winter": 1.25},
+    "clay":     {"spring": 1.00, "summer": 1.00, "autumn": 1.25, "winter": 0.75},
+    "glass":    {"spring": 1.00, "summer": 1.00, "autumn": 1.00, "winter": 1.00},
+}
 
 # ---- Bible §4.2 — hidden recipe discovery -----------------------------------
 # Experiments may only use these canonical items (never refined goods).
@@ -181,6 +201,23 @@ FARM_PLOW_YIELD = 6  # while the owner holds a plow tool
 # restores a derelict structure immediately.
 TITHE_RATES = {"shelter": 1, "mill": 3, "furnace": 5}
 DERELICT_WEEKS = 4
+
+# ---- Bible §2.6 — sustenance --------------------------------------------------
+# Food → AP, server-side. Daily caps per food (UTC); eating can never push
+# above the effective AP cap (shelter/ap_boon/feast raise the ceiling —
+# food only fills it). Eating destroys the food (a real sink).
+EAT_STATS = {
+    # food: (ap_per_unit, units_per_day_cap)
+    "grain": (2, 5),   # the baseline
+    "fruit": (3, 4),   # seasonal — summer fruit is a strategy
+    "flour": (5, 3),   # refined food beats raw
+    "herbs": (8, 1),   # "trail remedy" — the explorer's consumable
+}
+
+
+def _utc_day(now_ts: float) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(now_ts))
+
 
 # ---- Bible §9 — settlements --------------------------------------------------
 # Formation: 50 AP, founder within 8 tiles (Chebyshev) of a land center,
@@ -942,9 +979,86 @@ def _wear_tool(conn: sqlite3.Connection, pubkey: str, tool_id: str) -> bool:
     return False
 
 
-def _season_gather_adj(now_ts: float) -> int:
-    """Tooled-yield season adjustment (§11). Stub until the ch.11 season clock."""
+def ensure_world_genesis(conn: sqlite3.Connection, now_ts: float) -> float:
+    """Record the world's genesis timestamp once (the season clock's epoch).
+
+    Called at startup after the world seed stage; idempotent. Existing
+    worlds seeded before this chapter backfill on first startup.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS world_meta(key TEXT PRIMARY KEY, value TEXT)"
+    )
+    row = conn.execute(
+        "SELECT value FROM world_meta WHERE key = 'genesis_ts'"
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO world_meta (key, value) VALUES ('genesis_ts', ?)",
+            (str(now_ts),),
+        )
+        return now_ts
+    return float(row[0])
+
+
+def world_genesis_ts(conn: sqlite3.Connection, now_ts: float) -> float:
+    """Genesis timestamp for the season clock; missing → now (spring, day 0)."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM world_meta WHERE key = 'genesis_ts'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return now_ts  # table predates this chapter and startup hasn't backfilled
+    return float(row[0]) if row is not None else now_ts
+
+
+def season_index_at(conn: sqlite3.Connection, now_ts: float) -> int:
+    """Bible §7: season_index = (days_since_genesis // 14) % 4."""
+    days = max(0, int((now_ts - world_genesis_ts(conn, now_ts)) // 86400))
+    return (days // SEASON_DAYS) % 4
+
+
+def season_info(conn: sqlite3.Connection, now_ts: float) -> dict:
+    """Published season state for /world/info.seasons (§7). Zero writes."""
+    genesis = world_genesis_ts(conn, now_ts)
+    days = max(0, int((now_ts - genesis) // 86400))
+    idx = (days // SEASON_DAYS) % 4
+    season = SEASON_ORDER[idx]
+    season_start_day = (days // SEASON_DAYS) * SEASON_DAYS
+    return {
+        "season": season,
+        "index": idx,
+        "days_since_genesis": days,
+        "day_boundaries": {
+            "season_started_day": season_start_day,
+            "season_ends_day": season_start_day + SEASON_DAYS,
+        },
+        "multipliers": {
+            resource: {s: mults[s] for s in SEASON_ORDER}
+            for resource, mults in SEASON_MULT.items()
+        },
+    }
+
+
+def season_yield_adj(resource: str, season_idx: int, tooled: bool) -> int:
+    """Bible §7 gather-yield adjustment. Pure function (unit-testable).
+
+    >= 1.25 → +1 on tooled gathers; <= 0.50 → -1 (min 1 applied by the
+    caller); bare hands unaffected; unknown resources → 0.
+    """
+    if not tooled:
+        return 0
+    mult = SEASON_MULT.get(resource, {}).get(SEASON_ORDER[season_idx], 1.0)
+    if mult >= 1.25:
+        return 1
+    if mult <= 0.50:
+        return -1
     return 0
+
+
+def _season_gather_adj(conn: sqlite3.Connection, resource: str,
+                       tooled: bool, now_ts: float) -> int:
+    """Tooled-yield season adjustment (§7) for the gather path."""
+    return season_yield_adj(resource, season_index_at(conn, now_ts), tooled)
 
 
 def _gather_yield(conn: sqlite3.Connection, pubkey: str, resource: str,
@@ -957,7 +1071,7 @@ def _gather_yield(conn: sqlite3.Connection, pubkey: str, resource: str,
     """
     if not tooled:
         return GATHER_BARE_YIELD
-    y = max(1, GATHER_TOOLED_YIELD + _season_gather_adj(now_ts))
+    y = max(1, GATHER_TOOLED_YIELD + _season_gather_adj(conn, resource, tooled, now_ts))
     # Mill +1 timber while the owner holds a mill (ch.5). Derelict
     # filtering lands with upkeep in ch.8.
     if resource == "timber":
@@ -2555,6 +2669,10 @@ class BuildError(WorldError):
         super().__init__(detail)
 
 
+class EatError(WorldError):
+    status_code = 400
+
+
 class SettlementError(WorldError):
     status_code = 400
 
@@ -2567,6 +2685,73 @@ class SettlementNotFound(WorldError):
 
     def __init__(self, detail: str = "settlement not found"):
         super().__init__(detail)
+
+
+def eat(connect, agent_id: int, now_ts: float, item: str, qty: int) -> dict:
+    """Bible §2.6: convert food to AP.
+
+    ``POST /eat {item, qty}``. Server-side: daily caps per food (UTC day),
+    eating can never push above the effective AP cap, and the food is
+    destroyed. Atomic: inventory consume + cap accounting + AP credit
+    commit together.
+    """
+    if item not in EAT_STATS:
+        raise EatError(f"not food: {item!r}")
+    if not isinstance(qty, int) or isinstance(qty, bool) or qty < 1:
+        raise EatError("qty must be a positive integer")
+    ap_per_unit, day_cap = EAT_STATS[item]
+    day = _utc_day(now_ts)
+    conn = connect()
+    try:
+        st = _regen(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        eaten = conn.execute(
+            "SELECT qty FROM eat_log WHERE agent_pubkey = ? AND item = ?"
+            " AND day = ?",
+            (pubkey, item, day),
+        ).fetchone()
+        eaten_qty = int(eaten["qty"]) if eaten is not None else 0
+        if eaten_qty + qty > day_cap:
+            raise EatError(
+                f"daily cap for {item}: {day_cap}/day (UTC),"
+                f" {eaten_qty} already eaten today"
+            )
+        # Row-count-guarded consume: the food is destroyed.
+        cur = conn.execute(
+            "UPDATE inventories SET qty = qty - ?"
+            " WHERE agent_pubkey = ? AND resource = ? AND qty >= ?",
+            (qty, pubkey, item, qty),
+        )
+        if cur.rowcount == 0:
+            raise EatError(f"insufficient {item}")
+        conn.execute(
+            "INSERT INTO eat_log (agent_pubkey, item, day, qty)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(agent_pubkey, item, day) DO UPDATE"
+            " SET qty = qty + ?",
+            (pubkey, item, day, qty, qty),
+        )
+        gain = ap_per_unit * qty
+        cap = effective_ap_cap(conn, agent_id, pubkey, now_ts)
+        new_ap = min(st["ap"] + gain, cap)
+        conn.execute(
+            "UPDATE agent_world SET ap = ?, last_update = ? WHERE agent_id = ?",
+            (float(new_ap), now_ts, agent_id),
+        )
+        conn.commit()
+        return {
+            "item": item,
+            "qty": qty,
+            "ap_gained": new_ap - st["ap"],
+            "ap": new_ap,
+            "ap_cap": cap,
+            "eaten_today": eaten_qty + qty,
+            "day_cap": day_cap,
+        }
+    finally:
+        conn.close()
 
 
 class UpkeepError(WorldError):
@@ -2792,6 +2977,9 @@ def info_view(connect) -> dict:
             "legend": LEGEND,
             "ap_rules": AP_RULES,
             "agents_in_world": count,
+            # Bible §7: current season, index, day boundaries, multiplier
+            # table — published so agents can plan. Zero writes.
+            "seasons": season_info(conn, now()),
         }
     finally:
         conn.close()
