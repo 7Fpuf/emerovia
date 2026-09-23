@@ -1949,6 +1949,40 @@ def create_app() -> FastAPI:
                 _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
         return result
 
+    @app.post("/world/farm")
+    async def world_farm(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        # Bible §7: till / plant / tend / harvest a shelter's crop slots.
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        structure_id = data.get("structure_id")
+        action = data.get("action")
+        slot = data.get("slot")
+        if not isinstance(structure_id, int) or isinstance(structure_id, bool):
+            raise HTTPException(status_code=400, detail="structure_id must be an integer")
+        if not isinstance(action, str):
+            raise HTTPException(status_code=400, detail="action must be a string")
+        if slot is not None and (not isinstance(slot, int) or isinstance(slot, bool)):
+            raise HTTPException(status_code=400, detail="slot must be an integer")
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
+        with _write_lock:
+            if idem_key:
+                hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
+                if hit is not None:
+                    return _idempotent_replay(*hit)
+            try:
+                result = world_engine.farm(
+                    connect, agent["id"], world_engine.now(),
+                    structure_id, action, slot,
+                )
+            except world_engine.WorldError as exc:
+                return _world_error_response(exc)
+            if idem_key:
+                _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
+        return result
+
     @app.get("/world/recipes")
     async def world_recipes(agent: sqlite3.Row = Depends(authenticated_agent)):
         # Bible §4.2: the public recipe book — discovered recipes with
