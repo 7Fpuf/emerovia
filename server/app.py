@@ -720,12 +720,15 @@ def create_app() -> FastAPI:
     # Bible v1.2.0 ch.1 (resources + migration): rename legacy "ore" rows to
     # "iron_ore" 1:1 (ledger history untouched), then the additive overlay
     # re-seed (new rows only, INSERT OR IGNORE). Both idempotent.
+    # Bible v1.2.0 ch.4 (discovery): the 12 hidden recipes are drawn at
+    # genesis (deterministic) and carved on discovery. INSERT OR IGNORE.
     with _write_lock:
         conn = sqlite3.connect(str(db_path), timeout=30)
         _configure_db(conn)
         try:
             world_engine.migrate_resources_to_bible(conn)
             world_engine.seed_resource_overlay(conn)
+            world_engine.seed_hidden_recipes(conn)
             conn.commit()
         finally:
             conn.close()
@@ -1793,6 +1796,70 @@ def create_app() -> FastAPI:
             if idem_key:
                 _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
         return result
+
+    @app.post("/world/craft")
+    async def world_craft(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        # Bible §4.1: craft a crude tool (day-one known) or a discovered
+        # hidden recipe (404 until discovered). One per agent per recipe.
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        recipe_id = data.get("recipe_id")
+        if not isinstance(recipe_id, str) or not recipe_id:
+            raise HTTPException(status_code=400, detail="recipe_id must be a non-empty string")
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
+        with _write_lock:
+            if idem_key:
+                hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
+                if hit is not None:
+                    return _idempotent_replay(*hit)
+            try:
+                result = world_engine.craft(
+                    connect, agent["id"], agent["name"], world_engine.now(), recipe_id
+                )
+            except world_engine.WorldError as exc:
+                return _world_error_response(exc)
+            if idem_key:
+                _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
+        return result
+
+    @app.post("/world/experiment")
+    async def world_experiment(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        # Bible §4.2: probe a material combination. 2-3 distinct canonical
+        # items, 1-4 of each, else 400. Costs 2 AP + the materials, match or
+        # not; a first-ever match carves the inventor publicly and creates
+        # the durable tool row.
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        items = data.get("items")
+        if not isinstance(items, dict):
+            raise HTTPException(status_code=400, detail="items must be an object of item: qty")
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
+        with _write_lock:
+            if idem_key:
+                hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
+                if hit is not None:
+                    return _idempotent_replay(*hit)
+            try:
+                result = world_engine.experiment(
+                    connect, agent["id"], agent["name"], world_engine.now(), items
+                )
+            except world_engine.WorldError as exc:
+                return _world_error_response(exc)
+            if idem_key:
+                _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
+        return result
+
+    @app.get("/world/recipes")
+    async def world_recipes(agent: sqlite3.Row = Depends(authenticated_agent)):
+        # Bible §4.2: the public recipe book — discovered recipes with
+        # inventor credit, plus the count of still-hidden ones.
+        return world_engine.list_recipes(connect)
 
     @app.get("/world/inventory")
     async def world_inventory(agent: sqlite3.Row = Depends(authenticated_agent)):

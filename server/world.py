@@ -14,6 +14,8 @@ AP_RULES payloads, and DB functions that take a ``connect`` callable
 from __future__ import annotations
 
 import hashlib
+import itertools
+import json
 import math
 import random
 import sqlite3
@@ -89,6 +91,42 @@ GATHER_TOOLED_YIELD = 2
 # Season adjustment applies to the tooled yield only (§11). The season clock
 # itself lands in ch.11; until then this returns 0.
 SEASON_GATHER_ADJ = {"spring": 0, "summer": 1, "autumn": 0, "winter": -1}
+
+# ---- Bible §4.2 — hidden recipe discovery -----------------------------------
+# Experiments may only use these canonical items (never refined goods).
+DISCOVERY_CANONICAL_ITEMS = ["glass", "grain", "iron_ore", "timber"]
+# The 12 discoverable effects, in the fixed order the genesis draw assigns
+# them to combinations. Bounty passives add +1 gather yield on their
+# resource while owned; cart/ap_boon are already wired into the caps;
+# plow/far_speaker/climbing_gear/deft_hands/iron_lungs/signal_doctrine are
+# durable passive tools whose systems land in later chapters.
+DISCOVERED_EFFECTS = [
+    {"recipe_id": "plow",          "description": "+1 farm yield while owned"},
+    {"recipe_id": "far_speaker",   "description": "long-range voice while owned"},
+    {"recipe_id": "cart",          "description": "inventory cap 149 while owned"},
+    {"recipe_id": "climbing_gear", "description": "ignore mountain move penalty while owned"},
+    {"recipe_id": "ap_boon",       "description": "+10 AP cap while owned"},
+    {"recipe_id": "timber_bounty", "description": "+1 timber gather yield while owned"},
+    {"recipe_id": "ore_bounty",    "description": "+1 iron_ore gather yield while owned"},
+    {"recipe_id": "grain_bounty",  "description": "+1 grain gather yield while owned"},
+    {"recipe_id": "glass_bounty",  "description": "+1 glass gather yield while owned"},
+    {"recipe_id": "deft_hands",    "description": "crafting never fails while owned"},
+    {"recipe_id": "iron_lungs",    "description": "ignore ocean-adjacent AP tax while owned"},
+    {"recipe_id": "signal_doctrine","description": "herald relay access while owned"},
+]
+# resource -> bounty tool that adds +1 gather yield while owned
+BOUNTY_TOOL_FOR_RESOURCE = {
+    "timber": "timber_bounty",
+    "iron_ore": "ore_bounty",
+    "grain": "grain_bounty",
+    "glass": "glass_bounty",
+}
+# AP costs. Crude costs come from CRUDE_RECIPES; a hidden-recipe craft costs
+# 5 AP (Bible §4.1 leaves discovered craft AP unspecified — judgment call,
+# documented); an experiment costs 2 AP plus its materials.
+DISCOVERED_CRAFT_AP = 5
+EXPERIMENT_AP = 2
+RECIPE_DISCOVERY_SEED = "emerovia-discovery-v1"
 # Chits are simulation credits (see server/app.py): valueless, transferable
 # only inside trade offers, never redeemable.
 CHITS_ITEM = "chits"
@@ -299,6 +337,34 @@ class UnknownTool(WorldError):
         super().__init__(detail)
 
 
+class UnknownRecipe(WorldError):
+    status_code = 404
+
+    def __init__(self, detail: str = "unknown recipe"):
+        super().__init__(detail)
+
+
+class RecipeNotDiscovered(WorldError):
+    status_code = 404
+
+    def __init__(self, detail: str = "recipe not yet discovered"):
+        super().__init__(detail)
+
+
+class AlreadyCrafted(WorldError):
+    status_code = 400
+
+    def __init__(self, detail: str = "already crafted"):
+        super().__init__(detail)
+
+
+class InsufficientMaterials(WorldError):
+    status_code = 400
+
+    def __init__(self, detail: str = "insufficient materials"):
+        super().__init__(detail)
+
+
 class ToolNotOwned(WorldError):
     status_code = 400
 
@@ -466,6 +532,64 @@ def overlay_stock_for_tile(x: int, y: int, resource: str) -> int:
         f"{x},{y},{resource},{NATURAL_SEED}".encode("utf-8")
     ).hexdigest()
     return band_min + (int(digest, 16) % band_mod)
+
+
+def _all_discovery_combinations() -> list[tuple[str, dict[str, int]]]:
+    """All 352 legal experiment combinations: 2-3 distinct canonical items,
+    each quantity 1-4. Returns (canonical_key, inputs) in canonical order."""
+    items = DISCOVERY_CANONICAL_ITEMS
+    combos: list[tuple[str, dict[str, int]]] = []
+    for r in (2, 3):
+        for chosen in itertools.combinations(items, r):
+            for qtys in itertools.product((1, 2, 3, 4), repeat=r):
+                inputs = dict(zip(chosen, qtys))
+                key = "+".join(f"{item}:{inputs[item]}" for item in sorted(inputs))
+                combos.append((key, inputs))
+    combos.sort(key=lambda c: c[0])
+    return combos
+
+
+def generate_hidden_recipes() -> list[dict]:
+    """Genesis draw: 12 of the 352 combinations, deterministic under
+    RECIPE_DISCOVERY_SEED, assigned the 12 effects in fixed order.
+
+    Pure function — the same 12 rows every run, so genesis is reproducible
+    and tests can predict them.
+    """
+    combos = _all_discovery_combinations()
+    assert len(combos) == 352, f"expected 352 discovery combos, got {len(combos)}"
+    ranked = sorted(
+        combos,
+        key=lambda c: (
+            hashlib.sha256(f"{c[0]},{RECIPE_DISCOVERY_SEED}".encode()).hexdigest(),
+            c[0],
+        ),
+    )
+    recipes = []
+    for (key, inputs), effect in zip(ranked[:12], DISCOVERED_EFFECTS):
+        recipes.append(
+            {
+                "recipe_id": effect["recipe_id"],
+                "inputs_json": key,
+                "effect_json": json.dumps(effect),
+            }
+        )
+    return recipes
+
+
+def seed_hidden_recipes(conn: sqlite3.Connection) -> int:
+    """Insert the 12 genesis hidden recipes (inventor NULL = undiscovered).
+
+    Idempotent: INSERT OR IGNORE, so re-runs insert nothing.
+    """
+    recipes = generate_hidden_recipes()
+    cur = conn.executemany(
+        "INSERT OR IGNORE INTO recipes_hidden"
+        " (recipe_id, inputs_json, effect_json, inventor_pubkey, inventor_name,"
+        "  discovered_at) VALUES (?, ?, ?, NULL, NULL, NULL)",
+        [(r["recipe_id"], r["inputs_json"], r["effect_json"]) for r in recipes],
+    )
+    return cur.rowcount
 
 
 def seed_resource_overlay(conn: sqlite3.Connection) -> int:
@@ -759,7 +883,12 @@ def _gather_yield(conn: sqlite3.Connection, pubkey: str, resource: str,
     """
     if not tooled:
         return GATHER_BARE_YIELD
-    return max(1, GATHER_TOOLED_YIELD + _season_gather_adj(now_ts))
+    y = max(1, GATHER_TOOLED_YIELD + _season_gather_adj(now_ts))
+    # Discovered bounty passives (ch.4): +1 on their resource while owned.
+    bounty = BOUNTY_TOOL_FOR_RESOURCE.get(resource)
+    if bounty is not None and _owns_tool(conn, pubkey, bounty):
+        y += 1
+    return y
 
 
 def _seeded_max(x: int, y: int, resource: str) -> int:
@@ -988,6 +1117,222 @@ def move(connect, agent_id: int, direction: str, now_ts: float) -> dict:
         return {"x": nx, "y": ny, "terrain": terrain, "ap": new_ap, "cost": cost}
     finally:
         conn.close()
+
+
+def _consume_materials(conn: sqlite3.Connection, pubkey: str,
+                        inputs: dict[str, int]) -> None:
+    """Consume craft/experiment materials atomically.
+
+    Rowcount-guarded: each UPDATE only fires when the agent holds enough,
+    so concurrent consumption can't drive a balance negative. Zero-qty
+    rows are cleaned up afterward.
+    """
+    conn.row_factory = sqlite3.Row
+    for item, qty in inputs.items():
+        cur = conn.execute(
+            "UPDATE inventories SET qty = qty - ?"
+            " WHERE agent_pubkey = ? AND resource = ? AND qty >= ?",
+            (qty, pubkey, item, qty),
+        )
+        if cur.rowcount == 0:
+            raise InsufficientMaterials(f"insufficient {item}: need {qty}")
+    conn.execute(
+        "DELETE FROM inventories WHERE agent_pubkey = ? AND qty <= 0", (pubkey,)
+    )
+
+
+def _craft_tool_row(conn: sqlite3.Connection, pubkey: str, agent_name: str,
+                    recipe_id: str, durability: int, now_ts: float) -> None:
+    """Insert the durable tool row. Caller has consumed inputs and AP."""
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "INSERT INTO tools (agent_pubkey, recipe_id, durability,"
+        " max_durability, crafted_at) VALUES (?, ?, ?, ?, ?)",
+        (
+            pubkey,
+            recipe_id,
+            durability,
+            durability,
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
+        ),
+    )
+
+
+def craft(connect, agent_id: int, agent_name: str, now_ts: float,
+          recipe_id: str) -> dict:
+    """Craft a tool. Bible §4.1.
+
+    Crude recipes are day-one known (inputs + 2-3 AP from CRUDE_RECIPES).
+    Hidden recipes are craftable only after discovery (404 before — the
+    response never distinguishes hidden from nonexistent). One per agent:
+    recraft only after the tool breaks. Atomic: AP + materials + tool row
+    commit together; insufficient materials/AP is 400/402.
+    """
+    conn = connect()
+    try:
+        st = _regen(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        if recipe_id in CRUDE_RECIPES:
+            inputs, ap_cost = CRUDE_RECIPES[recipe_id]
+            durability = TOOL_DURABILITY_CRUDE
+        else:
+            row = conn.execute(
+                "SELECT inputs_json, inventor_pubkey FROM recipes_hidden"
+                " WHERE recipe_id = ?",
+                (recipe_id,),
+            ).fetchone()
+            if row is None:
+                raise UnknownRecipe(f"unknown recipe {recipe_id!r}")
+            if row["inventor_pubkey"] is None:
+                raise RecipeNotDiscovered(
+                    f"recipe {recipe_id!r} not yet discovered"
+                )
+            inputs = {
+                item: int(qty)
+                for item, qty in (
+                    part.split(":") for part in row["inputs_json"].split("+")
+                )
+            }
+            ap_cost = DISCOVERED_CRAFT_AP
+            durability = TOOL_DURABILITY_DISCOVERED
+        if _owns_tool(conn, pubkey, recipe_id):
+            raise AlreadyCrafted(
+                f"{recipe_id!r} already crafted — recraft after it breaks"
+            )
+        if st["ap"] < ap_cost:
+            raise InsufficientAP(st["ap"], ap_cost)
+        _consume_materials(conn, pubkey, inputs)
+        new_ap = st["ap"] - ap_cost
+        conn.execute(
+            "UPDATE agent_world SET ap = ?, last_update = ? WHERE agent_id = ?",
+            (float(new_ap), now_ts, agent_id),
+        )
+        _craft_tool_row(conn, pubkey, agent_name, recipe_id, durability, now_ts)
+        conn.commit()
+        return {
+            "recipe_id": recipe_id,
+            "durability": durability,
+            "ap": new_ap,
+        }
+    finally:
+        conn.close()
+
+
+def experiment(connect, agent_id: int, agent_name: str, now_ts: float,
+               items: dict[str, int]) -> dict:
+    """Probe a material combination for a hidden recipe. Bible §4.2.
+
+    The combination must use 2-3 distinct canonical items, 1-4 of each —
+    anything else is 400. Every experiment costs 2 AP and consumes the
+    submitted materials, match or not. A first-ever match carves the
+    inventor publicly (name + pubkey + timestamp, forever) and creates the
+    durable tool row; a later match just creates the tool row; a non-match
+    reports cleanly with no discovery.
+    """
+    conn = connect()
+    try:
+        st = _regen(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        if not isinstance(items, dict) or not (2 <= len(items) <= 3):
+            raise InvalidExperiment(
+                "experiment needs 2-3 distinct canonical items"
+            )
+        for item, qty in items.items():
+            if item not in DISCOVERY_CANONICAL_ITEMS:
+                raise InvalidExperiment(
+                    f"not a canonical experiment item: {item!r}"
+                )
+            if not isinstance(qty, int) or isinstance(qty, bool) or not (1 <= qty <= 4):
+                raise InvalidExperiment(
+                    f"quantity for {item!r} must be an integer 1-4"
+                )
+        key = "+".join(f"{item}:{items[item]}" for item in sorted(items))
+        if st["ap"] < EXPERIMENT_AP:
+            raise InsufficientAP(st["ap"], EXPERIMENT_AP)
+        match = conn.execute(
+            "SELECT recipe_id, inventor_pubkey FROM recipes_hidden"
+            " WHERE inputs_json = ?",
+            (key,),
+        ).fetchone()
+        recipe_id = match["recipe_id"] if match else None
+        if recipe_id is not None and _owns_tool(conn, pubkey, recipe_id):
+            raise AlreadyCrafted(
+                f"{recipe_id!r} already crafted — recraft after it breaks"
+            )
+        _consume_materials(conn, pubkey, dict(items))
+        new_ap = st["ap"] - EXPERIMENT_AP
+        conn.execute(
+            "UPDATE agent_world SET ap = ?, last_update = ? WHERE agent_id = ?",
+            (float(new_ap), now_ts, agent_id),
+        )
+        carved = False
+        if match is not None:
+            _craft_tool_row(
+                conn, pubkey, agent_name, recipe_id,
+                TOOL_DURABILITY_DISCOVERED, now_ts,
+            )
+            if match["inventor_pubkey"] is None:
+                conn.execute(
+                    "UPDATE recipes_hidden SET inventor_pubkey = ?,"
+                    " inventor_name = ?, discovered_at = ? WHERE recipe_id = ?",
+                    (
+                        pubkey,
+                        agent_name,
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
+                        recipe_id,
+                    ),
+                )
+                carved = True
+        conn.commit()
+        return {
+            "discovered": carved,
+            "recipe_id": recipe_id,
+            "carved_inventor": agent_name if carved else None,
+            "ap": new_ap,
+        }
+    finally:
+        conn.close()
+
+
+def list_recipes(connect) -> dict:
+    """Public recipe book: discovered recipes with inventor credit, plus the
+    count of still-hidden ones. Bible §4.2 — the carving is public."""
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT recipe_id, effect_json, inventor_name, discovered_at"
+            " FROM recipes_hidden WHERE inventor_pubkey IS NOT NULL"
+            " ORDER BY discovered_at, recipe_id"
+        ).fetchall()
+        hidden = conn.execute(
+            "SELECT COUNT(*) FROM recipes_hidden WHERE inventor_pubkey IS NULL"
+        ).fetchone()[0]
+        return {
+            "discovered": [
+                {
+                    "recipe_id": r["recipe_id"],
+                    "effect": json.loads(r["effect_json"])["description"],
+                    "inventor": r["inventor_name"],
+                    "discovered_at": r["discovered_at"],
+                }
+                for r in rows
+            ],
+            "still_hidden": int(hidden),
+        }
+    finally:
+        conn.close()
+
+
+class InvalidExperiment(WorldError):
+    status_code = 400
+
+    def __init__(self, detail: str = "invalid experiment"):
+        super().__init__(detail)
 
 
 def me_view(connect, agent_id: int, agent_name: str, now_ts: float) -> dict:
