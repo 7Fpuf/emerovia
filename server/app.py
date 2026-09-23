@@ -2038,7 +2038,8 @@ def create_app() -> FastAPI:
 
     @app.post("/world/tithe")
     async def world_tithe(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
-        # Bible §8: catch-up tithe payment on one owned structure.
+        # Bible §4.2: catch-up tithe payment on one owned structure
+        # (per-kind resource bundle, §11 UPKEEP_PER_KIND).
         try:
             data = await _parse_json(request)
         except ValueError:

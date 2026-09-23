@@ -219,13 +219,24 @@ FARM_GROW_SECONDS = 7200  # 2 real hours; ready_at is a timestamp, no ticks
 FARM_PLOW_PLANT_AP = 1
 FARM_PLOW_HARVEST_YIELD = 4
 
-# ---- Bible §8 — upkeep ------------------------------------------------------
-# Tithe per structure per 7-day week, in grain. Tracked per structure via
-# last_tithe_week; 4+ weeks behind → derelict (no output). The entry hook
-# auto-pays full weeks whenever the agent can afford them; anything
+# ---- Bible §4.2 — upkeep -----------------------------------------------------
+# Weekly tithe per structure, per 7-day week, IN KIND (Bible §11
+# UPKEEP_PER_KIND). Tracked per structure via last_tithe_week; 4+ weeks
+# behind → derelict (no gated output; never auto-demolished — the owner
+# may transfer or demolish a derelict structure). The entry hook
+# auto-pays full affordable weeks whenever the agent acts; anything
 # unaffordable stays in arrears. Catch-up (hook or POST /world/tithe)
 # restores a derelict structure immediately.
-TITHE_RATES = {"shelter": 1, "mill": 3, "furnace": 5}
+UPKEEP_PER_KIND = {
+    "shelter":  {"timber": 2},
+    "farm":     {"grain": 2},
+    "workshop": {"lumber": 1, "iron": 1},
+    "mill":     {"lumber": 2},
+    "relay":    {"copper": 1, "glass": 1},
+    "furnace":  {"coal": 2},
+    "embassy":  {"brick": 1, "copper": 1},
+    "custom":   {"timber": 1},
+}
 DERELICT_WEEKS = 4
 
 # ---- Bible §2.6 — sustenance --------------------------------------------------
@@ -1528,6 +1539,7 @@ def claim(connect, agent_id: int, now_ts: float, x: int, y: int) -> dict:
     conn = connect()
     try:
         st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
         pubkey = conn.execute(
             "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
         ).fetchone()["pubkey"]
@@ -1783,10 +1795,9 @@ def refine(connect, agent_id: int, now_ts: float, item: str) -> dict:
         conn.close()
 
 
-def _tithe_rate(kind: str) -> int:
-    # Functional structures have tithe rates; flavor structures are
-    # tithe-free (they produce nothing).
-    return TITHE_RATES.get(kind, 0)
+def _tithe_due(kind: str) -> dict:
+    """Weekly upkeep bundle for a structure kind (Bible §11)."""
+    return dict(UPKEEP_PER_KIND.get(kind, {}))
 
 
 def _weeks_behind(last_tithe_week: int, now_ts: float) -> int:
@@ -1799,37 +1810,44 @@ def _is_derelict(last_tithe_week: int, now_ts: float) -> bool:
 
 def _pay_tithe_for_structure(conn: sqlite3.Connection, pubkey: str,
                              structure: sqlite3.Row, now_ts: float) -> int:
-    """Pay a structure's tithe arrears from the agent's grain.
+    """Pay a structure's tithe arrears from the agent's inventory.
 
-    Pays as many full weeks as the agent can afford (never wastes grain
-    on a partial week) and advances last_tithe_week. Returns weeks paid.
-    Rowcount-guarded so concurrent payments can't overdraw.
+    Pays as many full weeks as the agent can afford across ALL bundle
+    resources (a week counts only when every resource in the bundle is
+    covered — never wastes materials on a partial week) and advances
+    last_tithe_week. Returns weeks paid. Every resource debit is
+    rowcount-guarded; a concurrent-payment race raises (the caller's
+    transaction rolls the whole payment back — no partial weeks).
     """
     conn.row_factory = sqlite3.Row
-    rate = _tithe_rate(structure["kind"])
-    if rate <= 0:
+    bundle = _tithe_due(structure["kind"])
+    if not bundle:
         return 0
     due = _weeks_behind(structure["last_tithe_week"], now_ts)
     if due <= 0:
         return 0
-    row = conn.execute(
-        "SELECT qty FROM inventories WHERE agent_pubkey = ? AND resource = 'grain'",
-        (pubkey,),
-    ).fetchone()
-    balance = int(row["qty"]) if row is not None else 0
-    weeks = min(due, balance // rate)
+    balances = {}
+    for res in bundle:
+        row = conn.execute(
+            "SELECT qty FROM inventories WHERE agent_pubkey = ? AND resource = ?",
+            (pubkey, res),
+        ).fetchone()
+        balances[res] = int(row["qty"]) if row is not None else 0
+    weeks = min(
+        due, min(balances[res] // need for res, need in bundle.items())
+    )
     if weeks <= 0:
         return 0
-    cur = conn.execute(
-        "UPDATE inventories SET qty = qty - ?"
-        " WHERE agent_pubkey = ? AND resource = 'grain' AND qty >= ?",
-        (weeks * rate, pubkey, weeks * rate),
-    )
-    if cur.rowcount == 0:
-        return 0
+    for res, need in bundle.items():
+        cur = conn.execute(
+            "UPDATE inventories SET qty = qty - ?"
+            " WHERE agent_pubkey = ? AND resource = ? AND qty >= ?",
+            (weeks * need, pubkey, res, weeks * need),
+        )
+        if cur.rowcount == 0:
+            raise UpkeepError("concurrent tithe payment — retry")
     conn.execute(
-        "DELETE FROM inventories WHERE agent_pubkey = ? AND resource = 'grain'"
-        " AND qty <= 0",
+        "DELETE FROM inventories WHERE agent_pubkey = ? AND qty <= 0",
         (pubkey,),
     )
     conn.execute(
@@ -1841,12 +1859,13 @@ def _pay_tithe_for_structure(conn: sqlite3.Connection, pubkey: str,
 
 
 def _apply_upkeep(conn: sqlite3.Connection, agent_id: int, now_ts: float) -> None:
-    """Bible §8 entry hook: auto-pay tithe arrears on owned structures.
+    """Bible §4.2 entry hook: auto-pay tithe arrears on owned structures.
 
-    Called on entry to move/gather/craft/build/refine/farm, inside the
-    caller's transaction — a failed action rolls the tithe payment back
-    with it. Structures the agent can't afford stay in arrears and go
-    derelict at 4+ weeks behind.
+    Called on entry to EVERY owner mutation (move/gather/craft/
+    experiment/claim/build/refine/farm/eat/tithe and the settlement
+    verbs), inside the caller's transaction — a failed action rolls the
+    tithe payment back with it. Structures the agent can't afford stay in
+    arrears and go derelict at 4+ weeks behind.
     """
     conn.row_factory = sqlite3.Row
     pubkey = conn.execute(
@@ -1861,11 +1880,12 @@ def _apply_upkeep(conn: sqlite3.Connection, agent_id: int, now_ts: float) -> Non
 
 
 def tithe(connect, agent_id: int, now_ts: float, structure_id: int) -> dict:
-    """Catch-up tithe payment on one owned structure. Bible §8.
+    """Catch-up tithe payment on one owned structure. Bible §4.2.
 
-    Pays all affordable full weeks of arrears; restores a derelict
-    structure as soon as its arrears clear. 400 when nothing is owed or
-    the agent can't afford a single week.
+    Pays all affordable full weeks of arrears (per-kind resource bundle,
+    §11 UPKEEP_PER_KIND); restores a derelict structure as soon as its
+    arrears clear. 400 when nothing is owed or the agent can't afford a
+    single full week.
     """
     conn = connect()
     try:
@@ -1881,16 +1901,18 @@ def tithe(connect, agent_id: int, now_ts: float, structure_id: int) -> dict:
         ).fetchone()
         if structure is None:
             raise UpkeepError(f"no structure {structure_id} owned by you")
-        if _tithe_rate(structure["kind"]) <= 0:
+        bundle = _tithe_due(structure["kind"])
+        if not bundle:
             raise UpkeepError("this structure owes no tithe")
         due = _weeks_behind(structure["last_tithe_week"], now_ts)
         if due <= 0:
             raise UpkeepError("no tithe owed on this structure")
         weeks = _pay_tithe_for_structure(conn, pubkey, structure, now_ts)
         if weeks <= 0:
-            rate = _tithe_rate(structure["kind"])
+            needs = ", ".join(f"{q} {r}" for r, q in sorted(bundle.items()))
             raise UpkeepError(
-                f"insufficient grain: need {rate} per week, {due} week(s) owed"
+                f"insufficient upkeep: need {needs} per week,"
+                f" {due} week(s) owed"
             )
         conn.commit()
         fresh = conn.execute(
@@ -1900,7 +1922,7 @@ def tithe(connect, agent_id: int, now_ts: float, structure_id: int) -> dict:
         return {
             "structure_id": structure_id,
             "weeks_paid": weeks,
-            "grain_paid": weeks * _tithe_rate(structure["kind"]),
+            "paid": {res: weeks * need for res, need in bundle.items()},
             "weeks_behind": _weeks_behind(fresh["last_tithe_week"], now_ts),
             "derelict": _is_derelict(fresh["last_tithe_week"], now_ts),
         }
@@ -2774,6 +2796,7 @@ def eat(connect, agent_id: int, now_ts: float, item: str, qty: int) -> dict:
     conn = connect()
     try:
         st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
         pubkey = conn.execute(
             "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
         ).fetchone()["pubkey"]
