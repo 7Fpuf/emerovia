@@ -1959,6 +1959,40 @@ def create_app() -> FastAPI:
                 _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
         return result
 
+    @app.post("/world/demolish")
+    async def world_demolish(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        # Bible §8: owner-only demolish (1 AP, no refunds, claim retained).
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        structure_id = data.get("structure_id")
+        if not isinstance(structure_id, int) or isinstance(structure_id, bool):
+            raise HTTPException(status_code=400, detail="structure_id must be an integer")
+        return _idempotent_mutation(
+            request, agent,
+            lambda: world_engine.demolish(
+                connect, agent["id"], world_engine.now(), structure_id))
+
+    @app.post("/world/transfer")
+    async def world_transfer(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        # Bible §8: owner-authorized structure transfer; the claim moves
+        # with the building and the recipient's claim cap is checked.
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        structure_id = data.get("structure_id")
+        to_pubkey = data.get("to_pubkey")
+        if not isinstance(structure_id, int) or isinstance(structure_id, bool):
+            raise HTTPException(status_code=400, detail="structure_id must be an integer")
+        if not isinstance(to_pubkey, str) or not to_pubkey:
+            raise HTTPException(status_code=400, detail="to_pubkey must be a non-empty string")
+        return _idempotent_mutation(
+            request, agent,
+            lambda: world_engine.transfer_structure(
+                connect, agent["id"], world_engine.now(), structure_id, to_pubkey))
+
     @app.post("/world/refine")
     async def world_refine(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
         # Bible §5: refine one batch at an owned furnace (1/5s).
@@ -2100,35 +2134,6 @@ def create_app() -> FastAPI:
                 _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
         return result
 
-    @app.post("/world/settlements/form")
-    async def settlements_form(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
-        try:
-            data = await _parse_json(request)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="invalid JSON body")
-        x, y = data.get("x"), data.get("y")
-        if not isinstance(x, int) or isinstance(x, bool) or \
-                not isinstance(y, int) or isinstance(y, bool):
-            raise HTTPException(status_code=400, detail="x and y must be integers")
-        return _idempotent_mutation(
-            request, agent,
-            lambda: world_engine.form_settlement(
-                connect, agent["id"], world_engine.now(), x, y))
-
-    @app.post("/world/settlements/join")
-    async def settlements_join(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
-        try:
-            data = await _parse_json(request)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="invalid JSON body")
-        settlement_id = data.get("settlement_id")
-        if not isinstance(settlement_id, int) or isinstance(settlement_id, bool):
-            raise HTTPException(status_code=400, detail="settlement_id must be an integer")
-        return _idempotent_mutation(
-            request, agent,
-            lambda: world_engine.join_settlement(
-                connect, agent["id"], world_engine.now(), settlement_id))
-
     @app.post("/world/settlements/name")
     async def settlements_name(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
         try:
@@ -2205,20 +2210,6 @@ def create_app() -> FastAPI:
             request, agent,
             lambda: world_engine.disburse_approve(
                 connect, agent["id"], world_engine.now(), disbursal_id))
-
-    @app.post("/world/settlements/feast")
-    async def settlements_feast(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
-        try:
-            data = await _parse_json(request)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="invalid JSON body")
-        settlement_id = data.get("settlement_id")
-        if not isinstance(settlement_id, int) or isinstance(settlement_id, bool):
-            raise HTTPException(status_code=400, detail="settlement_id must be an integer")
-        return _idempotent_mutation(
-            request, agent,
-            lambda: world_engine.feast_settlement(
-                connect, agent["id"], world_engine.now(), settlement_id))
 
     @app.post("/world/settlements/projects")
     async def settlements_projects(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
