@@ -172,6 +172,15 @@ FARM_HARVEST_AP = 1
 FARM_GROW_SECONDS = 7200  # 2 real hours; ready_at is a timestamp, no ticks
 FARM_BASE_YIELD = 4
 FARM_PLOW_YIELD = 6  # while the owner holds a plow tool
+
+# ---- Bible §8 — upkeep ------------------------------------------------------
+# Tithe per structure per 7-day week, in grain. Tracked per structure via
+# last_tithe_week; 4+ weeks behind → derelict (no output). The entry hook
+# auto-pays full weeks whenever the agent can afford them; anything
+# unaffordable stays in arrears. Catch-up (hook or POST /world/tithe)
+# restores a derelict structure immediately.
+TITHE_RATES = {"shelter": 1, "mill": 3, "furnace": 5}
+DERELICT_WEEKS = 4
 # Chits are simulation credits (see server/app.py): valueless, transferable
 # only inside trade offers, never redeemable.
 CHITS_ITEM = "chits"
@@ -830,8 +839,8 @@ def effective_ap_cap(conn: sqlite3.Connection, agent_id: int, pubkey: str,
     if (
         conn.execute(
             "SELECT 1 FROM structures WHERE owner_pubkey = ? AND kind = 'shelter'"
-            " LIMIT 1",
-            (pubkey,),
+            " AND (? - last_tithe_week) < ? LIMIT 1",
+            (pubkey, _tithe_week(now_ts), DERELICT_WEEKS),
         ).fetchone()
         is not None
     ):
@@ -934,8 +943,8 @@ def _gather_yield(conn: sqlite3.Connection, pubkey: str, resource: str,
     if resource == "timber":
         mill = conn.execute(
             "SELECT 1 FROM structures WHERE owner_pubkey = ? AND kind = 'mill'"
-            " LIMIT 1",
-            (pubkey,),
+            " AND (? - last_tithe_week) < ? LIMIT 1",
+            (pubkey, _tithe_week(now_ts), DERELICT_WEEKS),
         ).fetchone()
         if mill is not None:
             y += 1
@@ -1037,6 +1046,7 @@ def gather(
     conn = connect()
     try:
         st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
         _apply_regrow_tile(conn, st["x"], st["y"], now_ts)
         resource = _resolve_gather_resource(conn, st["x"], st["y"], resource)
         pubkey = conn.execute(
@@ -1148,6 +1158,7 @@ def move(connect, agent_id: int, direction: str, now_ts: float) -> dict:
     conn = connect()
     try:
         st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
         nx, ny = st["x"] + dx, st["y"] + dy
         if not (0 <= nx < WORLD_SIZE and 0 <= ny < WORLD_SIZE):
             raise BadMove("off map")
@@ -1226,6 +1237,7 @@ def craft(connect, agent_id: int, agent_name: str, now_ts: float,
     conn = connect()
     try:
         st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
         pubkey = conn.execute(
             "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
         ).fetchone()["pubkey"]
@@ -1289,6 +1301,7 @@ def experiment(connect, agent_id: int, agent_name: str, now_ts: float,
     conn = connect()
     try:
         st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
         pubkey = conn.execute(
             "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
         ).fetchone()["pubkey"]
@@ -1414,6 +1427,7 @@ def build(connect, agent_id: int, agent_name: str, now_ts: float, kind: str,
     try:
         conn.row_factory = sqlite3.Row
         st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
         pubkey = conn.execute(
             "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
         ).fetchone()["pubkey"]
@@ -1493,6 +1507,7 @@ def refine(connect, agent_id: int, now_ts: float, item: str) -> dict:
     try:
         conn.row_factory = sqlite3.Row
         st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
         pubkey = conn.execute(
             "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
         ).fetchone()["pubkey"]
@@ -1503,12 +1518,12 @@ def refine(connect, agent_id: int, now_ts: float, item: str) -> dict:
         if (
             conn.execute(
                 "SELECT 1 FROM structures WHERE owner_pubkey = ?"
-                " AND kind = 'furnace' LIMIT 1",
-                (pubkey,),
+                " AND kind = 'furnace' AND (? - last_tithe_week) < ? LIMIT 1",
+                (pubkey, _tithe_week(now_ts), DERELICT_WEEKS),
             ).fetchone()
             is None
         ):
-            raise RefineError("refining requires an owned furnace")
+            raise RefineError("refining requires an owned, kept-up furnace")
         if st["ap"] < ap_cost:
             raise InsufficientAP(st["ap"], ap_cost)
         inv = conn.execute(
@@ -1535,9 +1550,134 @@ def refine(connect, agent_id: int, now_ts: float, item: str) -> dict:
         conn.close()
 
 
+def _tithe_rate(kind: str) -> int:
+    # Functional structures have tithe rates; flavor structures are
+    # tithe-free (they produce nothing).
+    return TITHE_RATES.get(kind, 0)
+
+
+def _weeks_behind(last_tithe_week: int, now_ts: float) -> int:
+    return max(0, _tithe_week(now_ts) - int(last_tithe_week))
+
+
+def _is_derelict(last_tithe_week: int, now_ts: float) -> bool:
+    return _weeks_behind(last_tithe_week, now_ts) >= DERELICT_WEEKS
+
+
+def _pay_tithe_for_structure(conn: sqlite3.Connection, pubkey: str,
+                             structure: sqlite3.Row, now_ts: float) -> int:
+    """Pay a structure's tithe arrears from the agent's grain.
+
+    Pays as many full weeks as the agent can afford (never wastes grain
+    on a partial week) and advances last_tithe_week. Returns weeks paid.
+    Rowcount-guarded so concurrent payments can't overdraw.
+    """
+    conn.row_factory = sqlite3.Row
+    rate = _tithe_rate(structure["kind"])
+    if rate <= 0:
+        return 0
+    due = _weeks_behind(structure["last_tithe_week"], now_ts)
+    if due <= 0:
+        return 0
+    row = conn.execute(
+        "SELECT qty FROM inventories WHERE agent_pubkey = ? AND resource = 'grain'",
+        (pubkey,),
+    ).fetchone()
+    balance = int(row["qty"]) if row is not None else 0
+    weeks = min(due, balance // rate)
+    if weeks <= 0:
+        return 0
+    cur = conn.execute(
+        "UPDATE inventories SET qty = qty - ?"
+        " WHERE agent_pubkey = ? AND resource = 'grain' AND qty >= ?",
+        (weeks * rate, pubkey, weeks * rate),
+    )
+    if cur.rowcount == 0:
+        return 0
+    conn.execute(
+        "DELETE FROM inventories WHERE agent_pubkey = ? AND resource = 'grain'"
+        " AND qty <= 0",
+        (pubkey,),
+    )
+    conn.execute(
+        "UPDATE structures SET last_tithe_week = last_tithe_week + ?"
+        " WHERE id = ?",
+        (weeks, structure["id"]),
+    )
+    return weeks
+
+
+def _apply_upkeep(conn: sqlite3.Connection, agent_id: int, now_ts: float) -> None:
+    """Bible §8 entry hook: auto-pay tithe arrears on owned structures.
+
+    Called on entry to move/gather/craft/build/refine/farm, inside the
+    caller's transaction — a failed action rolls the tithe payment back
+    with it. Structures the agent can't afford stay in arrears and go
+    derelict at 4+ weeks behind.
+    """
+    conn.row_factory = sqlite3.Row
+    pubkey = conn.execute(
+        "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+    ).fetchone()["pubkey"]
+    structures = conn.execute(
+        "SELECT id, kind, last_tithe_week FROM structures WHERE owner_pubkey = ?",
+        (pubkey,),
+    ).fetchall()
+    for structure in structures:
+        _pay_tithe_for_structure(conn, pubkey, structure, now_ts)
+
+
+def tithe(connect, agent_id: int, now_ts: float, structure_id: int) -> dict:
+    """Catch-up tithe payment on one owned structure. Bible §8.
+
+    Pays all affordable full weeks of arrears; restores a derelict
+    structure as soon as its arrears clear. 400 when nothing is owed or
+    the agent can't afford a single week.
+    """
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        st = _regen(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        structure = conn.execute(
+            "SELECT id, kind, last_tithe_week FROM structures"
+            " WHERE id = ? AND owner_pubkey = ?",
+            (structure_id, pubkey),
+        ).fetchone()
+        if structure is None:
+            raise UpkeepError(f"no structure {structure_id} owned by you")
+        if _tithe_rate(structure["kind"]) <= 0:
+            raise UpkeepError("this structure owes no tithe")
+        due = _weeks_behind(structure["last_tithe_week"], now_ts)
+        if due <= 0:
+            raise UpkeepError("no tithe owed on this structure")
+        weeks = _pay_tithe_for_structure(conn, pubkey, structure, now_ts)
+        if weeks <= 0:
+            rate = _tithe_rate(structure["kind"])
+            raise UpkeepError(
+                f"insufficient grain: need {rate} per week, {due} week(s) owed"
+            )
+        conn.commit()
+        fresh = conn.execute(
+            "SELECT last_tithe_week FROM structures WHERE id = ?",
+            (structure_id,),
+        ).fetchone()
+        return {
+            "structure_id": structure_id,
+            "weeks_paid": weeks,
+            "grain_paid": weeks * _tithe_rate(structure["kind"]),
+            "weeks_behind": _weeks_behind(fresh["last_tithe_week"], now_ts),
+            "derelict": _is_derelict(fresh["last_tithe_week"], now_ts),
+        }
+    finally:
+        conn.close()
+
+
 def _farm_shelter(conn: sqlite3.Connection, pubkey: str,
-                   structure_id: int) -> sqlite3.Row:
-    """Fetch an owned shelter structure or raise."""
+                   structure_id: int, now_ts: float) -> sqlite3.Row:
+    """Fetch an owned, kept-up shelter structure or raise."""
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT * FROM structures WHERE id = ? AND owner_pubkey = ?",
@@ -1547,6 +1687,11 @@ def _farm_shelter(conn: sqlite3.Connection, pubkey: str,
         raise FarmError(f"no shelter {structure_id} owned by you")
     if row["kind"] != "shelter":
         raise FarmError(f"structure {structure_id} is not a shelter")
+    # Bible §8: a derelict shelter's farm plots are inert.
+    if _is_derelict(row["last_tithe_week"], now_ts):
+        raise FarmError(
+            f"shelter {structure_id} is derelict — pay the tithe to restore it"
+        )
     # Shelters raised before the farming chapter have no plot rows yet —
     # backfill lazily (INSERT OR IGNORE keeps this idempotent).
     for slot in range(FARM_SLOTS):
@@ -1572,10 +1717,11 @@ def farm(connect, agent_id: int, now_ts: float, structure_id: int,
     try:
         conn.row_factory = sqlite3.Row
         st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
         pubkey = conn.execute(
             "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
         ).fetchone()["pubkey"]
-        shelter = _farm_shelter(conn, pubkey, structure_id)
+        shelter = _farm_shelter(conn, pubkey, structure_id, now_ts)
         if action not in ("till", "plant", "tend", "harvest"):
             raise FarmError(f"unknown farm action {action!r}")
         if slot is None or isinstance(slot, bool) or not isinstance(slot, int) \
@@ -1723,6 +1869,13 @@ class BuildError(WorldError):
     status_code = 400
 
     def __init__(self, detail: str = "build failed"):
+        super().__init__(detail)
+
+
+class UpkeepError(WorldError):
+    status_code = 400
+
+    def __init__(self, detail: str = "upkeep failed"):
         super().__init__(detail)
 
 
