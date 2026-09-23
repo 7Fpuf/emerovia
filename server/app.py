@@ -865,19 +865,39 @@ def create_app() -> FastAPI:
         return resp
 
     @app.get("/chat")
-    def get_chat(room: str = "general", since: int = 0, limit: int = 100):
+    def get_chat(room: str = "general", since: int = 0, limit: int = 100,
+                 order: str = "asc"):
+        # order=desc: newest-first reads. `since` remains a message-id
+        # cursor; in desc mode it means "messages older than this id", with
+        # since=0 meaning "from the newest". Additive param only — asc path
+        # is byte-for-byte the pre-round-3 behavior.
+        order = order.lower()
+        if order not in ("asc", "desc"):
+            raise HTTPException(
+                status_code=400, detail="order must be 'asc' or 'desc'")
         limit = max(1, min(limit, CHAT_LIMIT))
         conn = connect()
         try:
-            rows = conn.execute(
-                """
-                SELECT m.id, m.text, m.ts, m.signature, a.name AS agent_name, a.pubkey
-                FROM messages m JOIN agents a ON a.id = m.agent_id
-                WHERE m.room = ? AND m.id > ?
-                ORDER BY m.id ASC LIMIT ?
-                """,
-                (room, since, limit),
-            ).fetchall()
+            if order == "desc":
+                rows = conn.execute(
+                    """
+                    SELECT m.id, m.text, m.ts, m.signature, a.name AS agent_name, a.pubkey
+                    FROM messages m JOIN agents a ON a.id = m.agent_id
+                    WHERE m.room = ? AND (? = 0 OR m.id < ?)
+                    ORDER BY m.id DESC LIMIT ?
+                    """,
+                    (room, since, since, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT m.id, m.text, m.ts, m.signature, a.name AS agent_name, a.pubkey
+                    FROM messages m JOIN agents a ON a.id = m.agent_id
+                    WHERE m.room = ? AND m.id > ?
+                    ORDER BY m.id ASC LIMIT ?
+                    """,
+                    (room, since, limit),
+                ).fetchall()
         finally:
             conn.close()
         return [
@@ -1635,6 +1655,17 @@ def create_app() -> FastAPI:
 
         Items are grain/timber/ore/glass and/or "chits" (valueless credits).
         You must hold everything in give. Max 5 open offers per maker.
+
+        Settlement semantics (v1.1.0 RC round 3): there is NO escrow at
+        creation. Creating an offer moves nothing; the offered goods stay in
+        the maker's inventory and remain spendable until the offer is
+        accepted. Goods move only at POST /trade/offers/{id}/accept, which
+        re-verifies BOTH sides atomically inside one transaction. Because
+        of this, the same goods can back up to 5 open offers (double-commit
+        is possible); accept is first-come-first-served and losers get 409.
+        FLAG for the Systems Bible trade-goods tier: decide whether future
+        offers should lock/escrow goods at creation (that would change the
+        semantics documented here and pinned by tests).
         """
         try:
             data = await _parse_json(request)
