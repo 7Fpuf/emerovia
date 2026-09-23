@@ -181,6 +181,26 @@ FARM_PLOW_YIELD = 6  # while the owner holds a plow tool
 # restores a derelict structure immediately.
 TITHE_RATES = {"shelter": 1, "mill": 3, "furnace": 5}
 DERELICT_WEEKS = 4
+
+# ---- Bible §9 — settlements --------------------------------------------------
+# Formation: 50 AP, founder within 8 tiles (Chebyshev) of a land center,
+# no other settlement center within 20 tiles. Joining: 10 AP, within 8
+# tiles of the center. Stewards are the member-governors: the founder is
+# first steward, joiners become stewards (PK keeps them distinct).
+SETTLEMENT_FORM_AP = 50
+SETTLEMENT_JOIN_AP = 10
+SETTLEMENT_FOUND_RADIUS = 8
+SETTLEMENT_JOIN_RADIUS = 8
+SETTLEMENT_MIN_SEPARATION = 20
+SETTLEMENT_NAME_MAX = 64
+# Feasts: 10 grain + 5 fruit from the treasury → every steward gets
+# +10 AP cap for 24h. Non-stacking: one active buff row per agent.
+FEAST_GRAIN = 10
+FEAST_FRUIT = 5
+FEAST_DURATION_SECONDS = 86400
+# Collective projects: shelter/mill/furnace raised on unclaimed land,
+# materials escrowed via contributions, completer pays the AP.
+PROJECT_KINDS = ("shelter", "mill", "furnace")
 # Chits are simulation credits (see server/app.py): valueless, transferable
 # only inside trade offers, never redeemable.
 CHITS_ITEM = "chits"
@@ -1828,6 +1848,669 @@ def farm(connect, agent_id: int, now_ts: float, structure_id: int,
         conn.close()
 
 
+# ---- settlements (Bible §9) -------------------------------------------------
+
+
+def _settlement(conn: sqlite3.Connection, settlement_id: int) -> sqlite3.Row:
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM settlements WHERE id = ?", (settlement_id,)
+    ).fetchone()
+    if row is None:
+        raise SettlementNotFound(f"no settlement {settlement_id}")
+    return row
+
+
+def _is_steward(conn: sqlite3.Connection, settlement_id: int, pubkey: str) -> bool:
+    conn.row_factory = sqlite3.Row
+    return (
+        conn.execute(
+            "SELECT 1 FROM settlement_stewards WHERE settlement_id = ?"
+            " AND agent_pubkey = ?",
+            (settlement_id, pubkey),
+        ).fetchone()
+        is not None
+    )
+
+
+def _require_steward(conn: sqlite3.Connection, settlement_id: int,
+                     pubkey: str) -> None:
+    if not _is_steward(conn, settlement_id, pubkey):
+        raise SettlementError("only settlement stewards can do that")
+
+
+def _ledger(conn: sqlite3.Connection, settlement_id: int, kind: str,
+            actor_pubkey: str, item: str | None = None,
+            qty: int | None = None, detail: str = "") -> None:
+    """Append to the settlement's PUBLIC ledger. Never edited, never
+    deleted — there is no code path that removes ledger rows."""
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "INSERT INTO settlement_ledger (settlement_id, ts, kind, actor_pubkey,"
+        " item, qty, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            settlement_id,
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            kind,
+            actor_pubkey,
+            item,
+            qty,
+            detail,
+        ),
+    )
+
+
+def _treasury_add(conn: sqlite3.Connection, settlement_id: int,
+                  item: str, qty: int) -> int:
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "INSERT INTO settlement_treasury (settlement_id, item, qty)"
+        " VALUES (?, ?, ?) ON CONFLICT(settlement_id, item)"
+        " DO UPDATE SET qty = qty + ?",
+        (settlement_id, item, qty, qty),
+    )
+    row = conn.execute(
+        "SELECT qty FROM settlement_treasury WHERE settlement_id = ? AND item = ?",
+        (settlement_id, item),
+    ).fetchone()
+    return int(row["qty"])
+
+
+def _treasury_take(conn: sqlite3.Connection, settlement_id: int,
+                   item: str, qty: int) -> bool:
+    """Rowcount-guarded treasury debit. Returns False when insufficient."""
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute(
+        "UPDATE settlement_treasury SET qty = qty - ?"
+        " WHERE settlement_id = ? AND item = ? AND qty >= ?",
+        (qty, settlement_id, item, qty),
+    )
+    if cur.rowcount == 0:
+        return False
+    conn.execute(
+        "DELETE FROM settlement_treasury WHERE settlement_id = ? AND qty <= 0",
+        (settlement_id,),
+    )
+    return True
+
+
+def form_settlement(connect, agent_id: int, now_ts: float, x: int, y: int) -> dict:
+    """Found a settlement. Bible §9: 50 AP, founder within 8 tiles
+    (Chebyshev) of a land center, no other center within 20 tiles.
+    The founder becomes the first steward."""
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        terrain = _tile_terrain(conn, x, y)
+        if terrain is None:
+            raise SettlementError("no such tile")
+        if terrain == "ocean":
+            raise SettlementError("settlements need a land center")
+        if max(abs(x - st["x"]), abs(y - st["y"])) > SETTLEMENT_FOUND_RADIUS:
+            raise SettlementError(
+                f"center beyond {SETTLEMENT_FOUND_RADIUS}-tile founding radius"
+            )
+        clash = conn.execute(
+            "SELECT id FROM settlements WHERE MAX(ABS(center_x - ?),"
+            " ABS(center_y - ?)) <= ? LIMIT 1",
+            (x, y, SETTLEMENT_MIN_SEPARATION),
+        ).fetchone()
+        if clash is not None:
+            raise SettlementError(
+                f"too close to settlement {clash['id']} (min"
+                f" {SETTLEMENT_MIN_SEPARATION} tiles apart)"
+            )
+        if st["ap"] < SETTLEMENT_FORM_AP:
+            raise InsufficientAP(st["ap"], SETTLEMENT_FORM_AP)
+        new_ap = st["ap"] - SETTLEMENT_FORM_AP
+        conn.execute(
+            "UPDATE agent_world SET ap = ?, last_update = ? WHERE agent_id = ?",
+            (float(new_ap), now_ts, agent_id),
+        )
+        cur = conn.execute(
+            "INSERT INTO settlements (name, center_x, center_y, formed_at)"
+            " VALUES (NULL, ?, ?, ?)",
+            (x, y, now_ts),
+        )
+        sid = cur.lastrowid
+        conn.execute(
+            "INSERT OR IGNORE INTO settlement_stewards (settlement_id, agent_pubkey)"
+            " VALUES (?, ?)",
+            (sid, pubkey),
+        )
+        _ledger(conn, sid, "formed", pubkey, detail=f"center ({x},{y})")
+        conn.commit()
+        return {"id": sid, "x": x, "y": y, "ap": new_ap}
+    finally:
+        conn.close()
+
+
+def join_settlement(connect, agent_id: int, now_ts: float,
+                    settlement_id: int) -> dict:
+    """Join a settlement as a steward. Bible §9: 10 AP, within 8 tiles
+    (Chebyshev) of the center."""
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        s = _settlement(conn, settlement_id)
+        if max(abs(s["center_x"] - st["x"]),
+               abs(s["center_y"] - st["y"])) > SETTLEMENT_JOIN_RADIUS:
+            raise SettlementError(
+                f"must be within {SETTLEMENT_JOIN_RADIUS} tiles of the center"
+            )
+        if _is_steward(conn, settlement_id, pubkey):
+            raise SettlementError("already a steward of this settlement")
+        if st["ap"] < SETTLEMENT_JOIN_AP:
+            raise InsufficientAP(st["ap"], SETTLEMENT_JOIN_AP)
+        new_ap = st["ap"] - SETTLEMENT_JOIN_AP
+        conn.execute(
+            "UPDATE agent_world SET ap = ?, last_update = ? WHERE agent_id = ?",
+            (float(new_ap), now_ts, agent_id),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO settlement_stewards (settlement_id, agent_pubkey)"
+            " VALUES (?, ?)",
+            (settlement_id, pubkey),
+        )
+        _ledger(conn, settlement_id, "joined", pubkey)
+        conn.commit()
+        return {"id": settlement_id, "ap": new_ap}
+    finally:
+        conn.close()
+
+
+def name_settlement(connect, agent_id: int, agent_name: str, now_ts: float,
+                    settlement_id: int, name: str) -> dict:
+    """Name a settlement, once, steward-only. Bible §9.
+
+    TODO(Atlas): the residents' proposal #3 naming convention is not
+    verifiable from available records — until its text is confirmed, any
+    non-empty name (≤64 chars) is accepted. Enforce the convention here
+    once it is.
+    """
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        s = _settlement(conn, settlement_id)
+        _require_steward(conn, settlement_id, pubkey)
+        if s["name"]:
+            raise SettlementError(
+                f"already named {s['name']!r} — names are permanent"
+            )
+        if not isinstance(name, str) or not name.strip():
+            raise SettlementError("name must be a non-empty string")
+        name = name.strip()
+        if len(name) > SETTLEMENT_NAME_MAX:
+            raise SettlementError(
+                f"name must be ≤ {SETTLEMENT_NAME_MAX} characters"
+            )
+        conn.execute(
+            "UPDATE settlements SET name = ?, named_at = ?, named_by = ?"
+            " WHERE id = ?",
+            (name, now_ts, pubkey, settlement_id),
+        )
+        _ledger(conn, settlement_id, "named", pubkey, detail=name)
+        conn.commit()
+        return {"id": settlement_id, "name": name, "named_by": agent_name}
+    finally:
+        conn.close()
+
+
+def contribute_settlement(connect, agent_id: int, now_ts: float,
+                          settlement_id: int, item: str, qty: int) -> dict:
+    """Contribute resources to the shared treasury. Steward-only, any
+    member contributes; the ledger records it publicly."""
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        _settlement(conn, settlement_id)
+        _require_steward(conn, settlement_id, pubkey)
+        if item not in ALL_RESOURCES:
+            raise SettlementError(f"cannot contribute {item!r}")
+        if not isinstance(qty, int) or isinstance(qty, bool) or qty <= 0:
+            raise SettlementError("qty must be a positive integer")
+        _consume_materials(conn, pubkey, {item: qty})
+        total = _treasury_add(conn, settlement_id, item, qty)
+        _ledger(conn, settlement_id, "contribute", pubkey, item, qty)
+        conn.commit()
+        return {
+            "id": settlement_id,
+            "item": item,
+            "contributed": qty,
+            "treasury_qty": total,
+        }
+    finally:
+        conn.close()
+
+
+def disburse_propose(connect, agent_id: int, now_ts: float, settlement_id: int,
+                     to_pubkey: str, item: str, qty: int) -> dict:
+    """Propose a treasury disbursement. Steward-only; needs a second
+    steward's approval before anything moves."""
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        _settlement(conn, settlement_id)
+        _require_steward(conn, settlement_id, pubkey)
+        if item not in ALL_RESOURCES:
+            raise SettlementError(f"cannot disburse {item!r}")
+        if not isinstance(qty, int) or isinstance(qty, bool) or qty <= 0:
+            raise SettlementError("qty must be a positive integer")
+        if (
+            conn.execute("SELECT 1 FROM agents WHERE pubkey = ?", (to_pubkey,))
+            .fetchone()
+            is None
+        ):
+            raise SettlementError("recipient is not a registered agent")
+        cur = conn.execute(
+            "INSERT INTO settlement_disbursals (settlement_id, to_pubkey, item,"
+            " qty, proposed_by, approved_by, proposed_at, status)"
+            " VALUES (?, ?, ?, ?, ?, NULL, ?, 'proposed')",
+            (settlement_id, to_pubkey, item, qty, pubkey, now_ts),
+        )
+        _ledger(
+            conn, settlement_id, "disburse_proposed", pubkey, item, qty,
+            detail=f"to {to_pubkey[:16]}…",
+        )
+        conn.commit()
+        return {"id": cur.lastrowid, "status": "proposed"}
+    finally:
+        conn.close()
+
+
+def disburse_approve(connect, agent_id: int, now_ts: float,
+                     disbursal_id: int) -> dict:
+    """Approve a proposed disbursement. The approver must be a steward
+    DISTINCT from the proposer — one agent can never approve their own
+    proposal. Treasury debit is rowcount-guarded; the recipient's
+    per-item cap applies."""
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        d = conn.execute(
+            "SELECT * FROM settlement_disbursals WHERE id = ?", (disbursal_id,)
+        ).fetchone()
+        if d is None:
+            raise SettlementError(f"no disbursal {disbursal_id}")
+        if d["status"] != "proposed":
+            raise SettlementError(f"disbursal already {d['status']}")
+        _require_steward(conn, d["settlement_id"], pubkey)
+        if d["proposed_by"] == pubkey:
+            raise SettlementError("a second steward must approve")
+        inv = conn.execute(
+            "SELECT qty FROM inventories WHERE agent_pubkey = ? AND resource = ?",
+            (d["to_pubkey"], d["item"]),
+        ).fetchone()
+        have = int(inv["qty"]) if inv is not None else 0
+        if have + int(d["qty"]) > inventory_cap(conn, d["to_pubkey"]):
+            raise SettlementError("recipient inventory would overfill")
+        if not _treasury_take(conn, d["settlement_id"], d["item"], int(d["qty"])):
+            raise SettlementError("insufficient treasury for this disbursement")
+        conn.execute(
+            "INSERT INTO inventories (agent_pubkey, resource, qty) VALUES (?, ?, ?)"
+            " ON CONFLICT(agent_pubkey, resource) DO UPDATE SET qty = qty + ?",
+            (d["to_pubkey"], d["item"], int(d["qty"]), int(d["qty"])),
+        )
+        conn.execute(
+            "UPDATE settlement_disbursals SET approved_by = ?, status = 'approved'"
+            " WHERE id = ?",
+            (pubkey, disbursal_id),
+        )
+        _ledger(
+            conn, d["settlement_id"], "disburse_approved", pubkey,
+            d["item"], int(d["qty"]), detail=f"to {d['to_pubkey'][:16]}…",
+        )
+        conn.commit()
+        return {"id": disbursal_id, "status": "approved"}
+    finally:
+        conn.close()
+
+
+def feast_settlement(connect, agent_id: int, now_ts: float,
+                     settlement_id: int) -> dict:
+    """Hold a feast: 10 grain + 5 fruit from the treasury → every steward
+    gets +10 AP cap for 24h. Non-stacking — one active buff row per agent,
+    a new feast replaces it."""
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        _settlement(conn, settlement_id)
+        _require_steward(conn, settlement_id, pubkey)
+        if not _treasury_take(conn, settlement_id, "grain", FEAST_GRAIN):
+            raise SettlementError(
+                f"treasury needs {FEAST_GRAIN} grain for a feast"
+            )
+        if not _treasury_take(conn, settlement_id, "fruit", FEAST_FRUIT):
+            # Roll the grain back: the feast needs both or neither.
+            _treasury_add(conn, settlement_id, "grain", FEAST_GRAIN)
+            raise SettlementError(
+                f"treasury needs {FEAST_FRUIT} fruit for a feast"
+            )
+        stewards = [
+            r["agent_pubkey"]
+            for r in conn.execute(
+                "SELECT agent_pubkey FROM settlement_stewards WHERE settlement_id = ?",
+                (settlement_id,),
+            ).fetchall()
+        ]
+        expires = now_ts + FEAST_DURATION_SECONDS
+        for spk in stewards:
+            conn.execute(
+                "INSERT INTO feast_buffs (agent_pubkey, settlement_id, granted_at,"
+                " expires_at) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(agent_pubkey) DO UPDATE SET settlement_id = ?,"
+                " granted_at = ?, expires_at = ?",
+                (spk, settlement_id, now_ts, expires,
+                 settlement_id, now_ts, expires),
+            )
+        _ledger(conn, settlement_id, "feast", pubkey,
+                detail=f"{len(stewards)} stewards buffed")
+        conn.commit()
+        return {
+            "id": settlement_id,
+            "buffed": len(stewards),
+            "expires_at": expires,
+        }
+    finally:
+        conn.close()
+
+
+def project_create(connect, agent_id: int, agent_name: str, now_ts: float,
+                   settlement_id: int, kind: str, x: int, y: int) -> dict:
+    """Start a collective build project on unclaimed land. Steward-only."""
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        _settlement(conn, settlement_id)
+        _require_steward(conn, settlement_id, pubkey)
+        if kind not in PROJECT_KINDS:
+            raise SettlementError(
+                f"project kind must be one of {', '.join(PROJECT_KINDS)}"
+            )
+        terrain = _tile_terrain(conn, x, y)
+        if terrain is None:
+            raise SettlementError("no such tile")
+        if terrain == "ocean":
+            raise SettlementError("cannot build on ocean")
+        if (
+            conn.execute("SELECT 1 FROM claims WHERE x = ? AND y = ?", (x, y))
+            .fetchone()
+            is not None
+        ):
+            raise SettlementError("projects go on unclaimed land")
+        if (
+            conn.execute("SELECT 1 FROM structures WHERE x = ? AND y = ?", (x, y))
+            .fetchone()
+            is not None
+        ):
+            raise SettlementError("tile already has a structure")
+        cur = conn.execute(
+            "INSERT INTO settlement_projects (settlement_id, kind, x, y, status,"
+            " created_at) VALUES (?, ?, ?, ?, 'funding', ?)",
+            (settlement_id, kind, x, y, now_ts),
+        )
+        _ledger(conn, settlement_id, "project_created", pubkey,
+                detail=f"{kind} at ({x},{y})")
+        conn.commit()
+        return {"id": cur.lastrowid, "status": "funding"}
+    finally:
+        conn.close()
+
+
+def project_contribute(connect, agent_id: int, now_ts: float, project_id: int,
+                       item: str, qty: int) -> dict:
+    """Contribute materials to a project's escrow. Steward-only, while
+    the project is funding."""
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        p = conn.execute(
+            "SELECT * FROM settlement_projects WHERE id = ?", (project_id,)
+        ).fetchone()
+        if p is None:
+            raise SettlementError(f"no project {project_id}")
+        if p["status"] != "funding":
+            raise SettlementError(f"project already {p['status']}")
+        _require_steward(conn, p["settlement_id"], pubkey)
+        if item not in ALL_RESOURCES:
+            raise SettlementError(f"cannot contribute {item!r}")
+        if not isinstance(qty, int) or isinstance(qty, bool) or qty <= 0:
+            raise SettlementError("qty must be a positive integer")
+        _consume_materials(conn, pubkey, {item: qty})
+        conn.execute(
+            "INSERT INTO project_contributions (project_id, agent_pubkey, item, qty)"
+            " VALUES (?, ?, ?, ?) ON CONFLICT(project_id, agent_pubkey, item)"
+            " DO UPDATE SET qty = qty + ?",
+            (project_id, pubkey, item, qty, qty),
+        )
+        _ledger(conn, p["settlement_id"], "project_contributed", pubkey,
+                item, qty, detail=f"project {project_id}")
+        conn.commit()
+        return {"id": project_id, "item": item, "contributed": qty}
+    finally:
+        conn.close()
+
+
+def _project_materials_met(conn: sqlite3.Connection, project_id: int,
+                           kind: str) -> bool:
+    inputs, _ = STRUCTURE_DEFS[kind]
+    for item, need in inputs.items():
+        total = conn.execute(
+            "SELECT COALESCE(SUM(qty), 0) FROM project_contributions"
+            " WHERE project_id = ? AND item = ?",
+            (project_id, item),
+        ).fetchone()[0]
+        if int(total) < need:
+            return False
+    return True
+
+
+def project_complete(connect, agent_id: int, agent_name: str, now_ts: float,
+                     project_id: int) -> dict:
+    """Complete a funded project: the completer pays the structure's AP,
+    escrowed materials are consumed, and the structure rises as a
+    collective asset (settlement_asset=1, custodied by the completer —
+    who also owes its tithe)."""
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        st = _regen(conn, agent_id, now_ts)
+        _apply_upkeep(conn, agent_id, now_ts)
+        pubkey = conn.execute(
+            "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()["pubkey"]
+        p = conn.execute(
+            "SELECT * FROM settlement_projects WHERE id = ?", (project_id,)
+        ).fetchone()
+        if p is None:
+            raise SettlementError(f"no project {project_id}")
+        if p["status"] != "funding":
+            raise SettlementError(f"project already {p['status']}")
+        _require_steward(conn, p["settlement_id"], pubkey)
+        inputs, ap_cost = STRUCTURE_DEFS[p["kind"]]
+        if not _project_materials_met(conn, project_id, p["kind"]):
+            raise SettlementError("project materials not fully contributed")
+        if (
+            conn.execute("SELECT 1 FROM claims WHERE x = ? AND y = ?",
+                        (p["x"], p["y"])).fetchone() is not None
+        ):
+            raise SettlementError("tile was claimed before completion")
+        if (
+            conn.execute("SELECT 1 FROM structures WHERE x = ? AND y = ?",
+                        (p["x"], p["y"])).fetchone() is not None
+        ):
+            raise SettlementError("tile already has a structure")
+        if st["ap"] < ap_cost:
+            raise InsufficientAP(st["ap"], ap_cost)
+        # Consume exactly the required materials from escrow, in
+        # agent_pubkey order; excess contributions stay escrowed.
+        for item, need in inputs.items():
+            remaining = need
+            rows = conn.execute(
+                "SELECT agent_pubkey, qty FROM project_contributions"
+                " WHERE project_id = ? AND item = ? ORDER BY agent_pubkey",
+                (project_id, item),
+            ).fetchall()
+            for r in rows:
+                if remaining <= 0:
+                    break
+                take = min(remaining, int(r["qty"]))
+                conn.execute(
+                    "UPDATE project_contributions SET qty = qty - ?"
+                    " WHERE project_id = ? AND agent_pubkey = ? AND item = ?",
+                    (take, project_id, r["agent_pubkey"], item),
+                )
+                remaining -= take
+        conn.execute(
+            "DELETE FROM project_contributions WHERE project_id = ? AND qty <= 0",
+            (project_id,),
+        )
+        new_ap = st["ap"] - ap_cost
+        conn.execute(
+            "UPDATE agent_world SET ap = ?, last_update = ? WHERE agent_id = ?",
+            (float(new_ap), now_ts, agent_id),
+        )
+        cur = conn.execute(
+            "INSERT INTO structures (owner_pubkey, kind, x, y, raised_at,"
+            " last_tithe_week, settlement_asset) VALUES (?, ?, ?, ?, ?, ?, 1)",
+            (
+                pubkey, p["kind"], p["x"], p["y"],
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
+                _tithe_week(now_ts),
+            ),
+        )
+        if p["kind"] == "shelter":
+            for slot in range(FARM_SLOTS):
+                conn.execute(
+                    "INSERT OR IGNORE INTO farm_plots (structure_id, slot, state)"
+                    " VALUES (?, ?, 'untilled')",
+                    (cur.lastrowid, slot),
+                )
+        conn.execute(
+            "UPDATE settlement_projects SET status = 'complete',"
+            " completed_at = ? WHERE id = ?",
+            (now_ts, project_id),
+        )
+        _ledger(conn, p["settlement_id"], "project_completed", pubkey,
+                detail=f"{p['kind']} at ({p['x']},{p['y']})")
+        conn.commit()
+        return {
+            "id": project_id,
+            "status": "complete",
+            "structure_id": cur.lastrowid,
+            "ap": new_ap,
+        }
+    finally:
+        conn.close()
+
+
+def settlement_view(connect, settlement_id: int) -> dict:
+    """Public settlement profile: center, name, stewards, treasury."""
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        s = _settlement(conn, settlement_id)
+        stewards = [
+            r["agent_pubkey"]
+            for r in conn.execute(
+                "SELECT agent_pubkey FROM settlement_stewards"
+                " WHERE settlement_id = ? ORDER BY agent_pubkey",
+                (settlement_id,),
+            ).fetchall()
+        ]
+        treasury = {
+            r["item"]: int(r["qty"])
+            for r in conn.execute(
+                "SELECT item, qty FROM settlement_treasury WHERE settlement_id = ?",
+                (settlement_id,),
+            ).fetchall()
+        }
+        return {
+            "id": s["id"],
+            "name": s["name"],
+            "center": {"x": s["center_x"], "y": s["center_y"]},
+            "formed_at": s["formed_at"],
+            "stewards": stewards,
+            "treasury": treasury,
+        }
+    finally:
+        conn.close()
+
+
+def settlement_ledger_view(connect, settlement_id: int) -> dict:
+    """The settlement's PUBLIC ledger — every entry, oldest first."""
+    conn = connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        _settlement(conn, settlement_id)
+        rows = conn.execute(
+            "SELECT ts, kind, actor_pubkey, item, qty, detail FROM settlement_ledger"
+            " WHERE settlement_id = ? ORDER BY id",
+            (settlement_id,),
+        ).fetchall()
+        return {
+            "id": settlement_id,
+            "entries": [
+                {
+                    "ts": r["ts"],
+                    "kind": r["kind"],
+                    "actor": r["actor_pubkey"],
+                    "item": r["item"],
+                    "qty": r["qty"],
+                    "detail": r["detail"],
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        conn.close()
+
+
 def list_recipes(connect) -> dict:
     """Public recipe book: discovered recipes with inventor credit, plus the
     count of still-hidden ones. Bible §4.2 — the carving is public."""
@@ -1869,6 +2552,20 @@ class BuildError(WorldError):
     status_code = 400
 
     def __init__(self, detail: str = "build failed"):
+        super().__init__(detail)
+
+
+class SettlementError(WorldError):
+    status_code = 400
+
+    def __init__(self, detail: str = "settlement action failed"):
+        super().__init__(detail)
+
+
+class SettlementNotFound(WorldError):
+    status_code = 404
+
+    def __init__(self, detail: str = "settlement not found"):
         super().__init__(detail)
 
 

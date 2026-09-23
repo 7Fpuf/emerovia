@@ -155,6 +155,38 @@ def tithe_week_of(db_path, structure_id):
         conn.close()
 
 
+def teleport(db_path, pubkey, x, y):
+    conn = db(db_path)
+    try:
+        conn.execute(
+            "UPDATE agent_world SET x = ?, y = ? WHERE agent_id ="
+            " (SELECT id FROM agents WHERE pubkey = ?)",
+            (x, y, pubkey),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def non_plains_land_tile(db_path):
+    """A land tile whose terrain resource is not grain.
+
+    The hook tests below assert exact grain counts after a gather; gathering
+    on a plains tile would add +1 grain and make the assertions
+    spawn-dependent. Teleporting to a non-plains tile keeps them
+    deterministic while the entry hook still fires on the gather.
+    """
+    conn = db(db_path)
+    try:
+        row = conn.execute(
+            "SELECT x, y, terrain FROM world_tiles WHERE terrain IN"
+            " ('forest', 'mountain', 'desert') LIMIT 1"
+        ).fetchone()
+        return (row["x"], row["y"], row["terrain"])
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------- tests
 
 def test_upkeep_constants(b7):
@@ -176,10 +208,12 @@ def test_entry_hook_auto_pays_arrears(b7, monkeypatch):
     set_inventory(db_path, pk, {"grain": 10})
     import server.world as w
     now_week = w._tithe_week(time.time())
+    tx, ty, tterrain = non_plains_land_tile(db_path)
+    teleport(db_path, pk, tx, ty)
     r = signed_request(client, keys[0], "POST", "/world/gather",
                        {"resource": {"plains": "grain", "forest": "timber",
                                      "mountain": "iron_ore",
-                                     "desert": "glass"}[me["terrain"]]})
+                                     "desert": "glass"}[tterrain]})
     assert r.status_code == 200, r.text
     assert grain_of(db_path, pk) == 0  # 10 grain tithed on entry
     assert tithe_week_of(db_path, sid) == now_week
@@ -197,10 +231,12 @@ def test_hook_pays_only_affordable_full_weeks(b7, monkeypatch):
     set_inventory(db_path, pk, {"grain": 7})  # affords 1 week (5)
     import server.world as w
     now_week = w._tithe_week(time.time())
+    tx, ty, tterrain = non_plains_land_tile(db_path)
+    teleport(db_path, pk, tx, ty)
     r = signed_request(client, keys[0], "POST", "/world/gather",
                        {"resource": {"plains": "grain", "forest": "timber",
                                      "mountain": "iron_ore",
-                                     "desert": "glass"}[me["terrain"]]})
+                                     "desert": "glass"}[tterrain]})
     assert r.status_code == 200, r.text
     assert grain_of(db_path, pk) == 2  # 5 paid, 2 kept — no partial week
     assert tithe_week_of(db_path, sid) == now_week - 1
@@ -216,10 +252,12 @@ def test_hook_leaves_unaffordable_arrears(b7, monkeypatch):
     sid, me = build_on_own_tile(client, keys, db_path, "furnace", {"stone": 10})
     age_structure(db_path, sid, 2)
     set_inventory(db_path, pk, {"grain": 4})  # less than one week's 5
+    tx, ty, tterrain = non_plains_land_tile(db_path)
+    teleport(db_path, pk, tx, ty)
     r = signed_request(client, keys[0], "POST", "/world/gather",
                        {"resource": {"plains": "grain", "forest": "timber",
                                      "mountain": "iron_ore",
-                                     "desert": "glass"}[me["terrain"]]})
+                                     "desert": "glass"}[tterrain]})
     assert r.status_code == 200, r.text
     assert grain_of(db_path, pk) == 4  # untouched
     import server.world as w
@@ -368,8 +406,10 @@ def test_flavor_structures_tithe_free(b7, monkeypatch):
     set_inventory(db_path, pk, {"grain": 9})
     import server.world as w
     old_week = w._tithe_week(time.time()) - 10
+    tx, ty, tterrain = non_plains_land_tile(db_path)
+    teleport(db_path, pk, tx, ty)
     r = signed_request(client, keys[0], "POST", "/world/gather",
-                       {"resource": TERRAIN_RESOURCE[me["terrain"]]})
+                       {"resource": TERRAIN_RESOURCE[tterrain]})
     assert r.status_code == 200, r.text
     assert grain_of(db_path, pk) == 9  # nothing taken
     assert tithe_week_of(db_path, sid) == old_week  # untouched

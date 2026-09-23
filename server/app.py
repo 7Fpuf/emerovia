@@ -2010,6 +2010,214 @@ def create_app() -> FastAPI:
                 _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
         return result
 
+    # ---- Bible §9 — settlements -------------------------------------------
+    def _settlement_mutation(request, agent, call):
+        # Shared idempotency wrapper for settlement mutations.
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
+        with _write_lock:
+            if idem_key:
+                hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
+                if hit is not None:
+                    return _idempotent_replay(*hit)
+            try:
+                result = call()
+            except world_engine.WorldError as exc:
+                return _world_error_response(exc)
+            if idem_key:
+                _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
+        return result
+
+    @app.post("/world/settlements/form")
+    async def settlements_form(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        x, y = data.get("x"), data.get("y")
+        if not isinstance(x, int) or isinstance(x, bool) or \
+                not isinstance(y, int) or isinstance(y, bool):
+            raise HTTPException(status_code=400, detail="x and y must be integers")
+        return _settlement_mutation(
+            request, agent,
+            lambda: world_engine.form_settlement(
+                connect, agent["id"], world_engine.now(), x, y))
+
+    @app.post("/world/settlements/join")
+    async def settlements_join(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        settlement_id = data.get("settlement_id")
+        if not isinstance(settlement_id, int) or isinstance(settlement_id, bool):
+            raise HTTPException(status_code=400, detail="settlement_id must be an integer")
+        return _settlement_mutation(
+            request, agent,
+            lambda: world_engine.join_settlement(
+                connect, agent["id"], world_engine.now(), settlement_id))
+
+    @app.post("/world/settlements/name")
+    async def settlements_name(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        settlement_id = data.get("settlement_id")
+        name = data.get("name")
+        if not isinstance(settlement_id, int) or isinstance(settlement_id, bool):
+            raise HTTPException(status_code=400, detail="settlement_id must be an integer")
+        if not isinstance(name, str):
+            raise HTTPException(status_code=400, detail="name must be a string")
+        return _settlement_mutation(
+            request, agent,
+            lambda: world_engine.name_settlement(
+                connect, agent["id"], agent["name"], world_engine.now(),
+                settlement_id, name))
+
+    @app.post("/world/settlements/contribute")
+    async def settlements_contribute(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        settlement_id = data.get("settlement_id")
+        item = data.get("item")
+        qty = data.get("qty")
+        if not isinstance(settlement_id, int) or isinstance(settlement_id, bool):
+            raise HTTPException(status_code=400, detail="settlement_id must be an integer")
+        if not isinstance(item, str):
+            raise HTTPException(status_code=400, detail="item must be a string")
+        if not isinstance(qty, int) or isinstance(qty, bool):
+            raise HTTPException(status_code=400, detail="qty must be an integer")
+        return _settlement_mutation(
+            request, agent,
+            lambda: world_engine.contribute_settlement(
+                connect, agent["id"], world_engine.now(),
+                settlement_id, item, qty))
+
+    @app.post("/world/settlements/disburse")
+    async def settlements_disburse(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        settlement_id = data.get("settlement_id")
+        to_pubkey = data.get("to_pubkey")
+        item = data.get("item")
+        qty = data.get("qty")
+        if not isinstance(settlement_id, int) or isinstance(settlement_id, bool):
+            raise HTTPException(status_code=400, detail="settlement_id must be an integer")
+        if not isinstance(to_pubkey, str):
+            raise HTTPException(status_code=400, detail="to_pubkey must be a string")
+        if not isinstance(item, str):
+            raise HTTPException(status_code=400, detail="item must be a string")
+        if not isinstance(qty, int) or isinstance(qty, bool):
+            raise HTTPException(status_code=400, detail="qty must be an integer")
+        return _settlement_mutation(
+            request, agent,
+            lambda: world_engine.disburse_propose(
+                connect, agent["id"], world_engine.now(),
+                settlement_id, to_pubkey, item, qty))
+
+    @app.post("/world/settlements/disburse/approve")
+    async def settlements_disburse_approve(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        disbursal_id = data.get("disbursal_id")
+        if not isinstance(disbursal_id, int) or isinstance(disbursal_id, bool):
+            raise HTTPException(status_code=400, detail="disbursal_id must be an integer")
+        return _settlement_mutation(
+            request, agent,
+            lambda: world_engine.disburse_approve(
+                connect, agent["id"], world_engine.now(), disbursal_id))
+
+    @app.post("/world/settlements/feast")
+    async def settlements_feast(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        settlement_id = data.get("settlement_id")
+        if not isinstance(settlement_id, int) or isinstance(settlement_id, bool):
+            raise HTTPException(status_code=400, detail="settlement_id must be an integer")
+        return _settlement_mutation(
+            request, agent,
+            lambda: world_engine.feast_settlement(
+                connect, agent["id"], world_engine.now(), settlement_id))
+
+    @app.post("/world/settlements/projects")
+    async def settlements_projects(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        settlement_id = data.get("settlement_id")
+        kind = data.get("kind")
+        x, y = data.get("x"), data.get("y")
+        if not isinstance(settlement_id, int) or isinstance(settlement_id, bool):
+            raise HTTPException(status_code=400, detail="settlement_id must be an integer")
+        if not isinstance(kind, str):
+            raise HTTPException(status_code=400, detail="kind must be a string")
+        if not isinstance(x, int) or isinstance(x, bool) or \
+                not isinstance(y, int) or isinstance(y, bool):
+            raise HTTPException(status_code=400, detail="x and y must be integers")
+        return _settlement_mutation(
+            request, agent,
+            lambda: world_engine.project_create(
+                connect, agent["id"], agent["name"], world_engine.now(),
+                settlement_id, kind, x, y))
+
+    @app.post("/world/settlements/projects/contribute")
+    async def settlements_projects_contribute(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        project_id = data.get("project_id")
+        item = data.get("item")
+        qty = data.get("qty")
+        if not isinstance(project_id, int) or isinstance(project_id, bool):
+            raise HTTPException(status_code=400, detail="project_id must be an integer")
+        if not isinstance(item, str):
+            raise HTTPException(status_code=400, detail="item must be a string")
+        if not isinstance(qty, int) or isinstance(qty, bool):
+            raise HTTPException(status_code=400, detail="qty must be an integer")
+        return _settlement_mutation(
+            request, agent,
+            lambda: world_engine.project_contribute(
+                connect, agent["id"], world_engine.now(), project_id, item, qty))
+
+    @app.post("/world/settlements/projects/complete")
+    async def settlements_projects_complete(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        project_id = data.get("project_id")
+        if not isinstance(project_id, int) or isinstance(project_id, bool):
+            raise HTTPException(status_code=400, detail="project_id must be an integer")
+        return _settlement_mutation(
+            request, agent,
+            lambda: world_engine.project_complete(
+                connect, agent["id"], agent["name"], world_engine.now(), project_id))
+
+    @app.get("/world/settlements/{settlement_id}")
+    async def settlements_view(settlement_id: int, agent: sqlite3.Row = Depends(authenticated_agent)):
+        try:
+            return world_engine.settlement_view(connect, settlement_id)
+        except world_engine.WorldError as exc:
+            return _world_error_response(exc)
+
+    @app.get("/world/settlements/{settlement_id}/ledger")
+    async def settlements_ledger(settlement_id: int, agent: sqlite3.Row = Depends(authenticated_agent)):
+        try:
+            return world_engine.settlement_ledger_view(connect, settlement_id)
+        except world_engine.WorldError as exc:
+            return _world_error_response(exc)
+
     @app.get("/world/recipes")
     async def world_recipes(agent: sqlite3.Row = Depends(authenticated_agent)):
         # Bible §4.2: the public recipe book — discovered recipes with
