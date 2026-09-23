@@ -573,6 +573,19 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
 
+    # Bible v1.2.0 ch.1 (resources + migration): rename legacy "ore" rows to
+    # "iron_ore" 1:1 (ledger history untouched), then the additive overlay
+    # re-seed (new rows only, INSERT OR IGNORE). Both idempotent.
+    with _write_lock:
+        conn = sqlite3.connect(str(db_path), timeout=30)
+        _configure_db(conn)
+        try:
+            world_engine.migrate_resources_to_bible(conn)
+            world_engine.seed_resource_overlay(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
     app = FastAPI(title="Agent Commons")
 
     def connect() -> sqlite3.Connection:
@@ -1600,6 +1613,16 @@ def create_app() -> FastAPI:
 
     @app.post("/world/gather")
     async def world_gather(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        # Bible §2.4: optional {resource}. Omitted + one resource present →
+        # that one (backward compatible); omitted + two present → 400 naming
+        # both. (Tool selection lands in the tools chapter.)
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        resource = data.get("resource")
+        if resource is not None and not isinstance(resource, str):
+            raise HTTPException(status_code=400, detail="resource must be a string")
         idem_key = _idempotency_key_from(request)
         endpoint = f"{request.method} {request.url.path}"
         with _write_lock:
@@ -1615,7 +1638,7 @@ def create_app() -> FastAPI:
                 conn.close()
             try:
                 result = world_engine.gather(
-                    connect, agent["id"], world_engine.now()
+                    connect, agent["id"], world_engine.now(), resource=resource
                 )
             except world_engine.WorldError as exc:
                 return _world_error_response(exc)
@@ -1911,7 +1934,7 @@ def create_app() -> FastAPI:
             trades_total = len(ledger)
             traders = set()
             volume_chits = 0
-            volume_by_resource = {r: 0 for r in world_engine.RESOURCES}
+            volume_by_resource = {r: 0 for r in world_engine.ALL_RESOURCES}
             for row in ledger:
                 traders.add(row["maker_pubkey"])
                 traders.add(row["taker_pubkey"])

@@ -37,20 +37,61 @@ DISCLOSE_COST = 1
 TERRAIN_RESOURCE = {
     "plains": "grain",
     "forest": "timber",
-    "mountain": "ore",
+    "mountain": "iron_ore",
     "desert": "glass",
 }
-RESOURCES = ("grain", "timber", "ore", "glass")
+# Bible §2.1: 11 raw resources in two passes. The legacy pass (Stage 4) seeds
+# one resource per land tile under the genesis seed; the overlay pass (§2.4
+# ruling 3) adds exactly one more per land tile under NATURAL_SEED. A tile
+# can therefore bear two resources (legacy + overlay).
+# The Stage 4 legacy set (what the old TERRAIN_RESOURCE seeded). Note the
+# legacy desert "glass" rows: they stay gatherable as the last wild glass
+# veins (Bible §2.4 ruling 1) even though glass is not in the raw tier.
+LEGACY_RESOURCES = ("grain", "timber", "iron_ore", "glass")
+OVERLAY_RESOURCES = ("fruit", "herbs", "fiber", "stone", "copper_ore", "coal",
+                     "sand", "clay")
+# Bible §2.1: exactly 11 raw resources in the tier table (canonical order).
+RAW_RESOURCES = ("timber", "stone", "clay", "sand", "fiber", "grain", "fruit",
+                 "herbs", "iron_ore", "copper_ore", "coal")
+# Gatherable = raw tier + legacy glass veins (depleting, never re-seeded).
+GATHERABLE_RESOURCES = RAW_RESOURCES + ("glass",)
+# Bible §2.1 refined: made at the furnace, never gathered.
+REFINED_RESOURCES = ("lumber", "iron", "copper", "glass", "flour", "brick")
+ALL_RESOURCES = RAW_RESOURCES + REFINED_RESOURCES
 # Chits are simulation credits (see server/app.py): valueless, transferable
 # only inside trade offers, never redeemable.
 CHITS_ITEM = "chits"
-TRADE_ITEMS = RESOURCES + (CHITS_ITEM,)
+# Bible §2.2: everything is tradable (trade is not counted toward the ≥2
+# mechanical-connections bar, but nothing is excluded from trade).
+TRADE_ITEMS = ALL_RESOURCES + (CHITS_ITEM,)
+# Foods for POST /eat and settlement feasts (Bible §2.6).
+FOODS = ("grain", "fruit", "flour", "herbs")
 
 GATHER_COST = 2
 INVENTORY_CAP = 99
 # Stock seed: 5 + (sha256("x,y,resource,agent-commons-genesis-v1") mod 6).
 STOCK_SEED_MIN = 5
 STOCK_SEED_MOD = 6
+
+# ---- Bible §2.4 ruling 3 — overlay re-seed --------------------------------
+# Deterministic under a seed DISTINCT from the genesis stock seed, so the two
+# passes are uncorrelated. Exactly one overlay resource per land tile,
+# terrain-typed. Overlay pick draw: u = sha256("x,y,pick,<seed>") selects by
+# cumulative weight; stock: banded sha256("x,y,resource,<seed>").
+NATURAL_SEED = "emerovia-natural-v1"
+OVERLAY_RULES = {
+    "plains": (("fruit", 50), ("herbs", 50)),
+    "forest": (("fiber", 100),),
+    "mountain": (("stone", 40), ("coal", 30), ("copper_ore", 30)),
+    "desert": (("sand", 70), ("clay", 30)),
+}
+# Bible §3.1 stock bands: (min, inclusive_mod) per resource.
+OVERLAY_STOCK_BANDS = {
+    "fruit": (5, 6), "herbs": (5, 6), "fiber": (5, 6),          # food & fiber 5-10
+    "stone": (6, 7), "sand": (6, 7), "clay": (6, 7),            # bulk 6-12
+    "copper_ore": (6, 5),                                       # scarce mineral 6-10
+    "coal": (8, 5),                                             # fuel mineral 8-12
+}
 
 TERRAINS = ("ocean", "plains", "forest", "desert", "mountain")
 LAND_TERRAINS = ("plains", "forest", "desert", "mountain")
@@ -216,8 +257,20 @@ class NothingToGather(WorldError):
 class TileDepleted(WorldError):
     status_code = 400
 
-    def __init__(self):
-        super().__init__("tile depleted")
+    def __init__(self, detail: str = "tile depleted"):
+        super().__init__(detail)
+
+
+class SpecifyResource(WorldError):
+    """Tile bears two resources (legacy + overlay): the gather must name one."""
+
+    status_code = 400
+
+    def __init__(self, resources: list[str]):
+        super().__init__(
+            "specify resource",
+            {"resources": sorted(resources)},
+        )
 
 
 class InventoryFull(WorldError):
@@ -299,12 +352,164 @@ def _tile_terrain(conn: sqlite3.Connection, x: int, y: int) -> str | None:
 # ---- Stage 4 — resource stock + gathering -------------------------------
 
 
+def _legacy_seed_name(resource: str) -> str:
+    """The resource name the ORIGINAL Stage 4 seed hash was computed with.
+
+    Bible §2.4 ruling 2 renames ore→iron_ore 1:1. Rows seeded before the
+    rename hashed "ore"; fresh-DB rows are seeded with the same hash so the
+    regrow cap (also computed from the original name) always matches the
+    seeded stock exactly, on old and new DBs alike.
+    """
+    return "ore" if resource == "iron_ore" else resource
+
+
 def stock_for_tile(x: int, y: int, resource: str) -> int:
-    """Deterministic seed stock 5..10 for a tile/resource pair."""
+    """Deterministic seed stock 5..10 for a legacy tile/resource pair.
+
+    Computed from the ORIGINAL Stage 4 resource name (ore, not iron_ore) so
+    the value matches rows seeded before the Bible rename — and fresh rows
+    seeded after it. The regrow cap reuses this exact function.
+    """
     digest = hashlib.sha256(
-        f"{x},{y},{resource},{SEED_ID}".encode("utf-8")
+        f"{x},{y},{_legacy_seed_name(resource)},{SEED_ID}".encode("utf-8")
     ).hexdigest()
     return STOCK_SEED_MIN + (int(digest, 16) % STOCK_SEED_MOD)
+
+
+def overlay_resource_for_tile(x: int, y: int, terrain: str) -> str | None:
+    """Deterministic overlay resource for a land tile (Bible §2.4 ruling 3).
+
+    Pure function of (x, y) under NATURAL_SEED — a seed distinct from the
+    genesis stock seed, so the overlay pass is uncorrelated with the legacy
+    pass. Returns None for ocean / unknown terrain (no overlay row).
+    """
+    rules = OVERLAY_RULES.get(terrain)
+    if not rules:
+        return None
+    u = (
+        int.from_bytes(
+            hashlib.sha256(f"{x},{y},pick,{NATURAL_SEED}".encode("utf-8")).digest()[:8],
+            "big",
+        )
+        / 18446744073709551616.0
+    )
+    total = sum(w for _, w in rules)
+    cutoff = u * total
+    acc = 0
+    for resource, weight in rules:
+        acc += weight
+        if cutoff < acc:
+            return resource
+    return rules[-1][0]
+
+
+def overlay_stock_for_tile(x: int, y: int, resource: str) -> int:
+    """Deterministic overlay seed stock under NATURAL_SEED, banded per §3.1."""
+    band_min, band_mod = OVERLAY_STOCK_BANDS[resource]
+    digest = hashlib.sha256(
+        f"{x},{y},{resource},{NATURAL_SEED}".encode("utf-8")
+    ).hexdigest()
+    return band_min + (int(digest, 16) % band_mod)
+
+
+def seed_resource_overlay(conn: sqlite3.Connection) -> int:
+    """Additive overlay re-seed (Bible §2.4 ruling 3): new rows only.
+
+    Exactly one overlay resource per land tile, terrain-typed, deterministic
+    under NATURAL_SEED. INSERT OR IGNORE semantics: existing (x,y,resource)
+    rows are no-ops, no existing assignment moves, no current yield changes.
+    Idempotent: a second run inserts nothing. Returns rows inserted.
+    """
+    conn.row_factory = sqlite3.Row
+    tiles = conn.execute(
+        "SELECT x, y, terrain FROM world_tiles WHERE terrain != 'ocean'"
+    ).fetchall()
+    rows = []
+    for t in tiles:
+        resource = overlay_resource_for_tile(t["x"], t["y"], t["terrain"])
+        if resource is None:
+            continue
+        rows.append(
+            (t["x"], t["y"], resource, overlay_stock_for_tile(t["x"], t["y"], resource))
+        )
+    if not rows:
+        return 0
+    before = conn.execute("SELECT COUNT(*) FROM world_resource_stock").fetchone()[0]
+    conn.executemany(
+        "INSERT OR IGNORE INTO world_resource_stock (x, y, resource, stock)"
+        " VALUES (?, ?, ?, ?)",
+        rows,
+    )
+    after = conn.execute("SELECT COUNT(*) FROM world_resource_stock").fetchone()[0]
+    return after - before
+
+
+def migrate_resources_to_bible(conn: sqlite3.Connection) -> dict:
+    """Bible §2.4 rulings 1-2 as data migration. Idempotent.
+
+    - Ruling 2: legacy "ore" rows become "iron_ore" 1:1 (a rename, not a
+      revaluation) in world_resource_stock, inventories, and open
+      trade_offers JSON. The trade LEDGER is append-only history: old rows
+      keep saying "ore" verbatim (never touched here).
+    - Ruling 1: legacy desert "glass" rows stay as-is — they are the last
+      wild glass veins, gatherable with the pick until depleted. No new
+      glass stock is ever seeded (glass now comes from the furnace).
+    Returns counts of renamed rows for observability.
+    """
+    conn.row_factory = sqlite3.Row
+    counts = {"stock": 0, "inventories": 0, "offers": 0}
+    cur = conn.execute(
+        "UPDATE world_resource_stock SET resource = 'iron_ore' WHERE resource = 'ore'"
+    )
+    counts["stock"] = cur.rowcount
+    # Inventories: "iron_ore" cannot pre-exist (new name), but merge
+    # defensively in case a row does.
+    for row in conn.execute(
+        "SELECT agent_pubkey, qty FROM inventories WHERE resource = 'ore'"
+    ).fetchall():
+        pubkey, qty = row["agent_pubkey"], int(row["qty"])
+        try:
+            conn.execute(
+                "UPDATE inventories SET resource = 'iron_ore'"
+                " WHERE agent_pubkey = ? AND resource = 'ore'",
+                (pubkey,),
+            )
+            counts["inventories"] += 1
+        except sqlite3.IntegrityError:
+            conn.execute(
+                "UPDATE inventories SET qty = qty + ?"
+                " WHERE agent_pubkey = ? AND resource = 'iron_ore'",
+                (qty, pubkey),
+            )
+            conn.execute(
+                "DELETE FROM inventories WHERE agent_pubkey = ? AND resource = 'ore'",
+                (pubkey,),
+            )
+            counts["inventories"] += 1
+    # Open trade offers are live state, not history: rename in their JSON.
+    import json as _json
+
+    for row in conn.execute(
+        "SELECT id, give_json, want_json FROM trade_offers WHERE status = 'open'"
+    ).fetchall():
+        give = _json.loads(row["give_json"])
+        want = _json.loads(row["want_json"])
+        changed = False
+        for side in (give, want):
+            if "ore" in side:
+                side["iron_ore"] = side.pop("ore")
+                changed = True
+        if changed:
+            conn.execute(
+                "UPDATE trade_offers SET give_json = ?, want_json = ? WHERE id = ?",
+                (
+                    _json.dumps(dict(sorted(give.items())), separators=(",", ":")),
+                    _json.dumps(dict(sorted(want.items())), separators=(",", ":")),
+                    row["id"],
+                ),
+            )
+            counts["offers"] += 1
+    return counts
 
 
 def seed_resource_stock(conn: sqlite3.Connection) -> int:
@@ -333,21 +538,65 @@ def seed_resource_stock(conn: sqlite3.Connection) -> int:
     return len(rows)
 
 
-def gather(connect, agent_id: int, now_ts: float) -> dict:
+def _present_resources(conn: sqlite3.Connection, x: int, y: int) -> dict:
+    """Live stock rows on a tile: {resource: stock} for stock > 0."""
+    return {
+        r["resource"]: int(r["stock"])
+        for r in conn.execute(
+            "SELECT resource, stock FROM world_resource_stock"
+            " WHERE x = ? AND y = ? AND stock > 0",
+            (x, y),
+        ).fetchall()
+    }
+
+
+def _resolve_gather_resource(
+    conn: sqlite3.Connection, x: int, y: int, resource: str | None
+) -> str:
+    """Bible §2.4 ruling 3: optional {resource} disambiguation.
+
+    Omitted + one resource present → that one (backward compatible);
+    omitted + two present → 400 naming both; named but absent/depleted → 400.
+    """
+    present = _present_resources(conn, x, y)
+    if resource is None:
+        if not present:
+            any_rows = conn.execute(
+                "SELECT 1 FROM world_resource_stock WHERE x = ? AND y = ?",
+                (x, y),
+            ).fetchone()
+            raise TileDepleted() if any_rows else NothingToGather()
+        if len(present) > 1:
+            raise SpecifyResource(list(present))
+        return next(iter(present))
+    if resource not in GATHERABLE_RESOURCES:
+        raise NothingToGather(f"unknown gatherable resource {resource!r}")
+    if resource not in present:
+        raise TileDepleted(f"tile depleted: no {resource} to gather here")
+    return resource
+
+
+def gather(
+    connect,
+    agent_id: int,
+    now_ts: float,
+    resource: str | None = None,
+) -> dict:
     """Gather 1 unit of the resource on the agent's current tile.
+
+    Bible §2.4: ``resource`` is optional — omitted with one resource present
+    gathers that one; omitted with two present → 400 ``specify resource``.
 
     Costs 2 AP. Atomic: deducts AP, decrements tile stock, increments
     inventory in one transaction. Ocean tiles yield nothing (400),
     depleted tiles refuse (400), per-resource inventory cap is 99 (400),
     and insufficient AP is 402 — same convention as move/disclose.
+    (Tool gating lands in the tools chapter; this keeps the flat rate.)
     """
     conn = connect()
     try:
         st = _regen(conn, agent_id, now_ts)
-        terrain = _tile_terrain(conn, st["x"], st["y"])
-        resource = TERRAIN_RESOURCE.get(terrain or "")
-        if resource is None:
-            raise NothingToGather()
+        resource = _resolve_gather_resource(conn, st["x"], st["y"], resource)
         if st["ap"] < GATHER_COST:
             raise InsufficientAP(st["ap"], GATHER_COST)
         inv = conn.execute(

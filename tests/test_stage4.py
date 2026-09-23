@@ -29,7 +29,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 TERRAIN_RESOURCE = {"plains": "grain", "forest": "timber",
-                    "mountain": "ore", "desert": "glass"}
+                    "mountain": "iron_ore", "desert": "glass"}
 
 
 # ---------------------------------------------------------------- helpers
@@ -74,8 +74,9 @@ def spawn(client: TestClient, key: SigningKey):
     return r.json()
 
 
-def gather(client: TestClient, key: SigningKey):
-    return signed_request(client, key, "POST", "/world/gather", {})
+def gather(client: TestClient, key: SigningKey, resource=None):
+    body = {} if resource is None else {"resource": resource}
+    return signed_request(client, key, "POST", "/world/gather", body)
 
 
 def offer(client: TestClient, key: SigningKey, give: dict, want: dict):
@@ -185,11 +186,12 @@ def test_resource_stock_seeded_deterministic_idempotent(s4):
             "SELECT COUNT(*) FROM world_tiles WHERE terrain != 'ocean'"
         ).fetchone()[0]
         rows = conn.execute("SELECT COUNT(*) FROM world_resource_stock").fetchone()[0]
-        assert rows == land
+        # Bible ch.1: legacy + overlay rows — exactly two per land tile.
+        assert rows == 2 * land
         lo, hi = conn.execute(
             "SELECT MIN(stock), MAX(stock) FROM world_resource_stock"
         ).fetchone()
-        assert 5 <= lo <= hi <= 10
+        assert 5 <= lo <= hi <= 12  # legacy 5-10, overlay bulk 6-12
         ocean_rows = conn.execute(
             """SELECT COUNT(*) FROM world_resource_stock s
                JOIN world_tiles t ON t.x = s.x AND t.y = s.y
@@ -233,7 +235,9 @@ def test_gather_yields_terrain_resource_and_costs(s4, monkeypatch):
         ).fetchone()["stock"]
     finally:
         conn.close()
-    r = gather(client, keys[0])
+    # Bible ch.1: tiles bear legacy + overlay resources, so the gather names
+    # its resource explicitly (omitted + two present -> 400, tested below).
+    r = gather(client, keys[0], expected)
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["resource"] == expected
@@ -288,8 +292,10 @@ def test_gather_depleted_tile_400(s4, monkeypatch):
         conn.commit()
     finally:
         conn.close()
-    assert gather(client, keys[0]).status_code == 200
-    r = gather(client, keys[0])
+    me = signed_request(client, keys[0], "GET", "/world/me", {}).json()
+    res = TERRAIN_RESOURCE[me["terrain"]]
+    assert gather(client, keys[0], res).status_code == 200
+    r = gather(client, keys[0], res)
     assert r.status_code == 400, r.text
     assert "depleted" in r.json()["detail"]
 
@@ -300,7 +306,7 @@ def test_gather_inventory_cap_99_400(s4, monkeypatch):
     spawn(client, keys[0])
     me = signed_request(client, keys[0], "GET", "/world/me", {}).json()
     set_inventory(db_path, keys[0], TERRAIN_RESOURCE[me["terrain"]], 99)
-    r = gather(client, keys[0])
+    r = gather(client, keys[0], TERRAIN_RESOURCE[me["terrain"]])
     assert r.status_code == 400, r.text
     assert "cap" in r.json()["detail"]
 
@@ -318,7 +324,8 @@ def test_gather_insufficient_ap_402(s4, monkeypatch):
         conn.commit()
     finally:
         conn.close()
-    r = gather(client, keys[0])
+    me = signed_request(client, keys[0], "GET", "/world/me", {}).json()
+    r = gather(client, keys[0], TERRAIN_RESOURCE[me["terrain"]])
     assert r.status_code == 402, r.text
 
 
@@ -326,8 +333,10 @@ def test_gather_rate_limit_429(s4, monkeypatch):
     client, keys, _, appmod = s4
     monkeypatch.setitem(appmod.RATE_LIMITS, "gather", (1, 60))
     spawn(client, keys[0])
-    assert gather(client, keys[0]).status_code == 200
-    r = gather(client, keys[0])
+    me = signed_request(client, keys[0], "GET", "/world/me", {}).json()
+    res = TERRAIN_RESOURCE[me["terrain"]]
+    assert gather(client, keys[0], res).status_code == 200
+    r = gather(client, keys[0], res)
     assert r.status_code == 429, r.text
     assert "retry-after" in r.headers
     assert "rate limited" in r.json()["detail"]
@@ -354,7 +363,7 @@ def test_create_offer_ok_and_listed(s4):
 
 def test_create_offer_maker_lacks_items_400(s4):
     client, keys, _, _ = s4
-    r = offer(client, keys[0], {"ore": 3}, {"chits": 5})
+    r = offer(client, keys[0], {"iron_ore": 3}, {"chits": 5})
     assert r.status_code == 400, r.text
     r = offer(client, keys[0], {"chits": 1000}, {"grain": 1})
     assert r.status_code == 400, r.text
@@ -507,8 +516,8 @@ def test_ledger_shape_limit_and_append_only(s4):
     client, keys, db_path, _ = s4
     _filled_trade(client, keys, db_path)
     set_inventory(db_path, keys[2], "timber", 4)
-    oid2 = offer(client, keys[2], {"timber": 4}, {"ore": 1}).json()["offer_id"]
-    set_inventory(db_path, keys[3], "ore", 2)
+    oid2 = offer(client, keys[2], {"timber": 4}, {"iron_ore": 1}).json()["offer_id"]
+    set_inventory(db_path, keys[3], "iron_ore", 2)
     assert signed_request(client, keys[3], "POST", f"/trade/offers/{oid2}/accept", {}).status_code == 200
     ledger = client.get("/trade/ledger").json()
     assert len(ledger) == 2
@@ -528,7 +537,8 @@ def test_economy_stats_numbers(s4, monkeypatch):
     monkeypatch.setitem(appmod.RATE_LIMITS, "gather", (100, 60))
     stock_before = client.get("/stats/economy").json()["total_stock_remaining"]
     spawn(client, keys[0])
-    assert gather(client, keys[0]).status_code == 200
+    me0 = signed_request(client, keys[0], "GET", "/world/me", {}).json()
+    assert gather(client, keys[0], TERRAIN_RESOURCE[me0["terrain"]]).status_code == 200
     _filled_trade(client, keys, db_path)
     set_inventory(db_path, keys[0], "grain", 99)  # extra open offer stays open
     offer(client, keys[0], {"grain": 1}, {"chits": 1})
@@ -537,7 +547,10 @@ def test_economy_stats_numbers(s4, monkeypatch):
     assert stats["unique_traders"] == 2
     assert stats["offers_open"] == 1
     assert stats["volume_chits"] == 10
-    assert stats["volume_by_resource"] == {"grain": 2, "timber": 0, "ore": 0, "glass": 0}
+    vol = stats["volume_by_resource"]
+    assert vol["grain"] == 2 and vol["timber"] == 0 and vol["iron_ore"] == 0 \
+        and vol["glass"] == 0
+    assert len(vol) == 17  # all Bible raw + refined resources
     assert stats["total_stock_remaining"] == stock_before - 1
 
 
@@ -555,8 +568,8 @@ def test_stats_economy_empty_world(s4):
 def test_inventory_view_shape(s4):
     client, keys, db_path, _ = s4
     set_inventory(db_path, keys[0], "grain", 7)
-    set_inventory(db_path, keys[0], "ore", 3)
+    set_inventory(db_path, keys[0], "iron_ore", 3)
     body = signed_request(client, keys[0], "GET", "/world/inventory", {}).json()
     assert body["agent_name"] == "eco-agent-0"
     assert body["chits"] == 100
-    assert body["inventory"] == {"grain": 7, "ore": 3}
+    assert body["inventory"] == {"grain": 7, "iron_ore": 3}
