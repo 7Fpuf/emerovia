@@ -1,0 +1,94 @@
+/* pwa.css — Emerovia observer PWA: phone-first responsive layer.
+ *
+ * Loaded AFTER the inline <style> in index.html, so these rules win.
+ * Strictly presentational: nothing here can change world state.
+ */
+
+:root {
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+}
+
+html, body {
+  height: 100%;
+  height: 100dvh;                       /* modern browsers */
+  height: calc(var(--pwa-vh, 1vh) * 100); /* iOS Safari fallback, set by pwa.js */
+}
+
+body {
+  /* keep the app clear of the notch and the home indicator */
+  padding-top: var(--sat);
+  padding-left: var(--sal);
+  padding-right: var(--sar);
+  overscroll-behavior: none;
+  touch-action: manipulation;             /* no double-tap zoom on UI chrome */
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
+#map { touch-action: none; }             /* drag + pinch are handled in JS */
+#stage { -webkit-user-select: none; user-select: none; }
+
+/* ================= phones (<=640px): phone-first observer layout ================= */
+@media (max-width: 640px) {
+  body { font-size: 13px; }
+
+  /* compact top bar: brand + LIVE + two buttons fit 390px */
+  #topbar { height: 52px; gap: 10px; padding: 0 10px; }
+  #brand .logo { width: 28px; height: 28px; font-size: 15px; border-radius: 8px; }
+  #brand h1 { font-size: 15px; letter-spacing: 1.5px; }
+  #brand h1 .thin { display: none; }     /* "OBSERVER VIEW" lives in the app name */
+  #live-badge { font-size: 9px; letter-spacing: 1.5px; padding: 4px 8px; }
+  #top-actions { gap: 6px; }
+  .tbtn { font-size: 10px; letter-spacing: .5px; padding: 7px 8px; min-height: 36px; }
+
+  /* deterministic split: map on top, scrolling panel below */
+  #main { height: calc(var(--pwa-vh, 1vh) * 100 - 52px - 30px - var(--sat)); }
+  #stage { flex: none; height: 40vh; min-height: 0; }
+  #side { flex: 1; min-height: 0; padding-bottom: var(--sab); }
+
+  /* 44px touch targets on the six tabs */
+  #tabs button { min-height: 46px; font-size: 10px; letter-spacing: .8px; padding: 8px 2px; }
+
+  /* HUD compaction: nothing overlaps at 390px */
+  #legend { left: 8px; bottom: 8px; padding: 6px 8px; font-size: 10px; max-width: 44vw; }
+  #legend .lrow { gap: 5px; margin: 2px 0; }
+  #hud-coords {
+    right: 8px; bottom: 8px; font-size: 10px; padding: 5px 8px;
+    min-width: 0; max-width: 44vw; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  #follow-chip { top: 8px; left: 8px; font-size: 11px; max-width: calc(100% - 16px); }
+
+  /* spotlight becomes a bottom sheet */
+  #spotlight {
+    top: auto; bottom: 10px; left: 10px; right: 10px;
+    width: auto; max-height: 54vh; border-radius: 16px;
+  }
+
+  #banner-zone { top: 12px; }
+  .banner { font-size: 14px; padding: 10px 16px; max-width: 92%; }
+  .banner .sub { font-size: 11px; }
+
+  #modal { padding: 18px; }
+  #modal-wrap { padding: var(--sab) 0 0 0; }
+  .feed-item { font-size: 12px; }
+  .cmsg .ct { font-size: 12.5px; }
+  .acard .nm { font-size: 13px; }
+}
+
+/* ================= small tablets / large phones landscape (641–920px) ================= */
+@media (min-width: 641px) and (max-width: 920px) {
+  #main { height: calc(var(--pwa-vh, 1vh) * 100 - 88px - var(--sat)); }
+  #stage { flex: none; height: 42vh; min-height: 0; }
+  #side { flex: 1; min-height: 0; padding-bottom: var(--sab); }
+  #tabs button { min-height: 44px; }
+  #spotlight { width: min(340px, calc(100% - 28px)); }
+}
+
+/* ================= installed app: tighten the chrome ================= */
+@media (display-mode: standalone) {
+  #topbar { border-bottom-color: rgba(34, 211, 238, .18); }
+}

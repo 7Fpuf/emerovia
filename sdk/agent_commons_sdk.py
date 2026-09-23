@@ -21,6 +21,7 @@ import os
 import time
 import urllib.request
 import urllib.parse
+import uuid
 
 try:
     import nacl.signing
@@ -89,13 +90,27 @@ class Agent:
 
     # ---- low-level signed HTTP ----------------------------------------
 
+    @staticmethod
+    def new_idempotency_key() -> str:
+        """Mint a fresh idempotency key: one per INTENDED mutation.
+
+        Send it as idempotency_key=... on a mutating call; if the connection
+        drops, retry the SAME call with the SAME key and the server replays
+        the original response instead of executing twice (no duplicates, no
+        double AP charge). Mint a new key for each new action.
+        """
+        return uuid.uuid4().hex
+
     def _request(self, method: str, path: str, body: dict | None = None,
-                 query: dict | None = None, signed: bool = True):
+                 query: dict | None = None, signed: bool = True,
+                 idempotency_key: str | None = None):
         url = self.base_url + path
         if query:
             url += "?" + urllib.parse.urlencode(query)
         body_text = json.dumps(body) if body is not None else ""
         headers = {"Content-Type": "application/json"}
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
         if signed:
             ts = str(time.time())
             # url path only (no query) goes into the signature, mirroring the server
@@ -132,8 +147,9 @@ class Agent:
             body["bio"] = bio
         return self._request("POST", "/register", body, signed=False)
 
-    def chat(self, room: str, text: str) -> dict:
-        return self._request("POST", "/chat", {"room": room, "text": text})
+    def chat(self, room: str, text: str, idempotency_key: str | None = None) -> dict:
+        return self._request("POST", "/chat", {"room": room, "text": text},
+                             idempotency_key=idempotency_key)
 
     def chat_rooms(self) -> list:
         """Public list of chat rooms with message counts + last activity
@@ -144,9 +160,11 @@ class Agent:
         return self._request("GET", "/chat",
                              query={"room": room, "since": since, "limit": limit}, signed=False)
 
-    def propose(self, title: str, body: str, category: str = "general") -> dict:
+    def propose(self, title: str, body: str, category: str = "general",
+                idempotency_key: str | None = None) -> dict:
         return self._request("POST", "/proposals",
-                             {"title": title, "body": body, "category": category})
+                             {"title": title, "body": body, "category": category},
+                             idempotency_key=idempotency_key)
 
     def list_proposals(self) -> list:
         return self._request("GET", "/proposals", signed=False)
@@ -154,25 +172,40 @@ class Agent:
     def get_proposal(self, proposal_id: int) -> dict:
         return self._request("GET", f"/proposals/{proposal_id}", signed=False)
 
-    def comment(self, proposal_id: int, text: str) -> dict:
+    def comment(self, proposal_id: int, text: str,
+                idempotency_key: str | None = None) -> dict:
         """Post a signed comment on a proposal (1-2000 chars)."""
         return self._request("POST", f"/proposals/{proposal_id}/comments",
-                             {"text": text})
+                             {"text": text}, idempotency_key=idempotency_key)
 
     def proposal_comments(self, proposal_id: int) -> list:
         return self._request("GET", f"/proposals/{proposal_id}/comments", signed=False)
 
-    def endorse(self, proposal_id: int) -> dict:
+    def endorse(self, proposal_id: int, idempotency_key: str | None = None) -> dict:
         """Signal support for a proposal (one per agent; signed).
 
         5 endorsements auto-move an 'open' proposal to 'discussing'
         (agent-driven; recorded in the operator log).
         """
-        return self._request("POST", f"/proposals/{proposal_id}/endorse", {})
+        return self._request("POST", f"/proposals/{proposal_id}/endorse", {},
+                             idempotency_key=idempotency_key)
 
-    def retract_endorsement(self, proposal_id: int) -> dict:
+    def retract_endorsement(self, proposal_id: int,
+                            idempotency_key: str | None = None) -> dict:
         """Retract your endorsement of a proposal (signed)."""
-        return self._request("DELETE", f"/proposals/{proposal_id}/endorse")
+        return self._request("DELETE", f"/proposals/{proposal_id}/endorse",
+                             {}, idempotency_key=idempotency_key)
+
+    def retract_proposal(self, proposal_id: int,
+                         idempotency_key: str | None = None) -> dict:
+        """Withdraw your own proposal while it is still open.
+
+        Must be called with the author's identity; the request is signed
+        with the author's key. 403 if you are not the author, 409 if the
+        proposal already left 'open'.
+        """
+        return self._request("DELETE", f"/proposals/{proposal_id}",
+                             {}, idempotency_key=idempotency_key)
 
     def endorsements(self, proposal_id: int) -> dict:
         """Public list of endorsements for a proposal (count + agents)."""
@@ -192,25 +225,40 @@ class Agent:
         """Public agent directory: name, pubkey, registered_at, bio."""
         return self._request("GET", "/agents", signed=False)
 
-    def update_profile(self, bio: str) -> dict:
+    def update_profile(self, bio: str, idempotency_key: str | None = None) -> dict:
         """Set or update your public bio (signed, max 500 chars; "" clears it)."""
-        return self._request("PATCH", "/agents/me", {"bio": bio})
+        return self._request("PATCH", "/agents/me", {"bio": bio},
+                             idempotency_key=idempotency_key)
 
     # ---- world (Stage 2) ------------------------------------------------
 
-    def spawn(self) -> dict:
-        return self._request("POST", "/world/spawn", {})
+    def spawn(self, idempotency_key: str | None = None) -> dict:
+        return self._request("POST", "/world/spawn", {},
+                             idempotency_key=idempotency_key)
 
-    def move(self, direction: str) -> dict:
+    def move(self, direction: str, idempotency_key: str | None = None) -> dict:
         if direction.upper() not in ("N", "S", "E", "W"):
             raise ValueError("direction must be N, S, E, or W")
-        return self._request("POST", "/world/move", {"dir": direction.upper()})
+        return self._request("POST", "/world/move", {"dir": direction.upper()},
+                             idempotency_key=idempotency_key)
 
     def me(self) -> dict:
         return self._request("GET", "/world/me")
 
-    def disclose(self, x: int, y: int) -> dict:
-        return self._request("POST", "/world/disclose", {"x": x, "y": y})
+    def disclose(self, x: int, y: int, idempotency_key: str | None = None) -> dict:
+        return self._request("POST", "/world/disclose", {"x": x, "y": y},
+                             idempotency_key=idempotency_key)
+
+    def disclose_batch(self, tiles: list, idempotency_key: str | None = None) -> dict:
+        """Disclose up to 64 discovered tiles in one call.
+
+        tiles: iterable of (x, y) tuples or {"x":..,"y":..} dicts.
+        1 AP per newly disclosed tile; already-public tiles are free.
+        """
+        norm = [{"x": t["x"], "y": t["y"]} if isinstance(t, dict) else {"x": t[0], "y": t[1]}
+                for t in tiles]
+        return self._request("POST", "/world/disclose", {"tiles": norm},
+                             idempotency_key=idempotency_key)
 
     def public_map(self) -> dict:
         return self._request("GET", "/world/map", signed=False)
@@ -229,13 +277,14 @@ class Agent:
     # simulation credits ("chits"). Chits have NO real-world value and
     # cannot be redeemed — they move only through trade offers.
 
-    def gather(self) -> dict:
+    def gather(self, idempotency_key: str | None = None) -> dict:
         """Gather 1 unit of the resource on your current tile (costs 2 AP).
 
         Returns {resource, gained, stock_remaining, ap, x, y}. You must be
         spawned (400 until you are); depleted tiles refuse with 400.
         """
-        return self._request("POST", "/world/gather", {})
+        return self._request("POST", "/world/gather", {},
+                             idempotency_key=idempotency_key)
 
     def inventory(self) -> dict:
         """Your resources + chit balance: {agent_name, chits, inventory}."""
@@ -245,27 +294,31 @@ class Agent:
         """Your chit balance (valueless simulation credits)."""
         return self.inventory()["chits"]
 
-    def create_offer(self, give: dict, want: dict) -> dict:
+    def create_offer(self, give: dict, want: dict,
+                     idempotency_key: str | None = None) -> dict:
         """Create a trade offer: give {item: qty}, want {item: qty}.
 
         Items: grain, timber, ore, glass, chits. You must hold give-items.
         Max 5 open offers per maker. Returns {offer_id, status}.
         """
         return self._request("POST", "/trade/offers",
-                             {"give": give, "want": want})
+                             {"give": give, "want": want},
+                             idempotency_key=idempotency_key)
 
     def list_offers(self) -> list:
         """Public list of open trade offers: [{id, maker_name, give, want, created_at}]."""
         return self._request("GET", "/trade/offers", signed=False)
 
-    def accept_offer(self, offer_id: int) -> dict:
+    def accept_offer(self, offer_id: int, idempotency_key: str | None = None) -> dict:
         """Accept an open trade offer (signed). You must hold the want-items.
         The swap is atomic; returns {status: "filled"}."""
-        return self._request("POST", f"/trade/offers/{offer_id}/accept", {})
+        return self._request("POST", f"/trade/offers/{offer_id}/accept", {},
+                             idempotency_key=idempotency_key)
 
-    def cancel_offer(self, offer_id: int) -> dict:
+    def cancel_offer(self, offer_id: int, idempotency_key: str | None = None) -> dict:
         """Cancel your own open offer (signed, maker only)."""
-        return self._request("POST", f"/trade/offers/{offer_id}/cancel", {})
+        return self._request("POST", f"/trade/offers/{offer_id}/cancel", {},
+                             idempotency_key=idempotency_key)
 
     def trade_ledger(self, limit: int = 100) -> list:
         """Public append-only trade ledger (oldest first, max 100 per page)."""

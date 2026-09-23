@@ -481,6 +481,12 @@ def me_view(connect, agent_id: int, agent_name: str, now_ts: float) -> dict:
         count = conn.execute(
             "SELECT COUNT(*) FROM discoveries WHERE agent_id = ?", (agent_id,)
         ).fetchone()[0]
+        undisclosed = conn.execute(
+            "SELECT COUNT(*) FROM discoveries d WHERE d.agent_id = ?"
+            " AND NOT EXISTS (SELECT 1 FROM public_map p"
+            " WHERE p.x = d.x AND p.y = d.y)",
+            (agent_id,),
+        ).fetchone()[0]
         return {
             "agent_name": agent_name,
             "x": st["x"],
@@ -491,6 +497,11 @@ def me_view(connect, agent_id: int, agent_name: str, now_ts: float) -> dict:
             "ap_per_minute": 1,
             "seconds_until_next_ap": st["seconds_until_next_ap"],
             "private_discoveries": count,
+            # QA v1.1.0 round 2: additive field (item 11). private_discoveries
+            # is a LIFETIME counter of all discoveries ever; undisclosed_tiles
+            # is the count of discovered-but-not-yet-public tiles for this
+            # agent (i.e. tiles still eligible for POST /world/disclose).
+            "undisclosed_tiles": undisclosed,
         }
     finally:
         conn.close()
@@ -528,6 +539,74 @@ def disclose(connect, agent_id: int, x: int, y: int, now_ts: float) -> dict:
         )
         conn.commit()
         return {"x": x, "y": y, "terrain": terrain, "already_public": False}
+    finally:
+        conn.close()
+
+
+def disclose_batch(
+    connect, agent_id: int, tiles: list[tuple[int, int]], now_ts: float
+) -> dict:
+    """Disclose many privately-discovered tiles in one call (QA v1.1.0).
+
+    The single-tile form POST /world/disclose {"x","y"} keeps working;
+    this powers the batch form {"tiles": [{"x","y"}, ...]}.
+
+    Costs 1 AP per NEWLY disclosed tile; already-public tiles are free,
+    undiscovered tiles are skipped with an error entry. Processing stops
+    at the first tile the agent cannot afford — remaining tiles are
+    returned as skipped. One transaction: all-or-nothing per tile, with
+    AP persisted once at the end.
+    """
+    conn = connect()
+    try:
+        st = _regen(conn, agent_id, now_ts)
+        ap = st["ap"]
+        results: list[dict] = []
+        disclosed = 0
+        out_of_ap = False
+        for x, y in tiles:
+            if out_of_ap:
+                results.append({"x": x, "y": y, "error": "insufficient AP", "skipped": True})
+                continue
+            disc = conn.execute(
+                "SELECT terrain FROM discoveries WHERE agent_id = ? AND x = ? AND y = ?",
+                (agent_id, x, y),
+            ).fetchone()
+            if disc is None:
+                results.append({"x": x, "y": y, "error": "tile not discovered"})
+                continue
+            already = conn.execute(
+                "SELECT 1 FROM public_map WHERE x = ? AND y = ?", (x, y)
+            ).fetchone()
+            if already:
+                results.append(
+                    {"x": x, "y": y, "terrain": disc["terrain"], "already_public": True}
+                )
+                continue
+            if ap < DISCLOSE_COST:
+                out_of_ap = True
+                results.append({"x": x, "y": y, "error": "insufficient AP", "skipped": True})
+                continue
+            ap -= DISCLOSE_COST
+            conn.execute(
+                "INSERT INTO public_map (x, y, terrain, disclosed_by, disclosed_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (x, y, disc["terrain"], agent_id, utcnow_iso()),
+            )
+            disclosed += 1
+            results.append(
+                {"x": x, "y": y, "terrain": disc["terrain"], "already_public": False}
+            )
+        conn.execute(
+            "UPDATE agent_world SET ap = ?, last_update = ? WHERE agent_id = ?",
+            (float(ap), now_ts, agent_id),
+        )
+        conn.commit()
+        return {
+            "results": results,
+            "disclosed": disclosed,
+            "ap": ap,
+        }
     finally:
         conn.close()
 

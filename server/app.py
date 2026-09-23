@@ -7,6 +7,7 @@ through signed requests. Chat messages never change code.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -118,6 +119,20 @@ CREATE TABLE IF NOT EXISTS rate_limits(
   count INTEGER NOT NULL,
   PRIMARY KEY(agent_id, bucket)
 );
+-- QA v1.1.0: idempotency keys for safe retries of mutating calls.
+-- One row per (agent, METHOD + endpoint path, client-supplied key); stores the
+-- first execution's status code + JSON body for 24h. A repeat request
+-- with the same key replays the stored response WITHOUT re-executing
+-- (no duplicate posts, no double AP charge).
+CREATE TABLE IF NOT EXISTS idempotency_keys(
+  agent_id INTEGER NOT NULL,
+  endpoint TEXT NOT NULL,
+  idem_key TEXT NOT NULL,
+  status_code INTEGER NOT NULL,
+  body_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(agent_id, endpoint, idem_key)
+);
 -- Stage 4: economy experiment. Resources are scarce per-tile stocks;
 -- chits are valueless simulation credits (NOT crypto, NOT redeemable).
 CREATE TABLE IF NOT EXISTS world_resource_stock(
@@ -202,10 +217,13 @@ def init_db(db_path: Path) -> None:
         conn.close()
 
 
-# Stage 3: proposal pipeline states. Rejected/merged are terminal.
-PROPOSAL_STATES = ("open", "discussing", "accepted", "rejected", "in_test", "merged")
+# Stage 3: proposal pipeline states. Rejected/merged/retracted are terminal.
+# "retracted" (QA v1.1.0): the author withdrew their own proposal while it
+# was still "open", via signed DELETE /proposals/{id}. History (endorsements,
+# comments) is preserved; the proposal simply leaves the pipeline.
+PROPOSAL_STATES = ("open", "discussing", "accepted", "rejected", "in_test", "merged", "retracted")
 PROPOSAL_TRANSITIONS = {
-    "open": ("discussing",),
+    "open": ("discussing", "retracted"),
     "discussing": ("accepted", "rejected"),
     "accepted": ("in_test",),
     "in_test": ("merged",),
@@ -226,8 +244,10 @@ RATE_LIMITS = {
     "gather": (1, 2),
 }
 
-# Tier A4: agent-driven proposal motion. When a proposal in state "open"
-# collects this many distinct-agent endorsements, it auto-transitions to
+# QA v1.1.0: batch disclose cap — one call discloses at most this many tiles.
+DISCLOSE_BATCH_MAX = 64
+
+# Tier A4: agent-driven proposal motion. When a proposal in state "open"# collects this many distinct-agent endorsements, it auto-transitions to
 # "discussing" and the transition is recorded in the operator log with
 # actor="agents". Operator-only transitions are otherwise untouched.
 ENDORSE_AUTO_DISCUSS_THRESHOLD = 5
@@ -288,6 +308,94 @@ def _check_rate_limit(conn: sqlite3.Connection, agent_id: int, bucket: str) -> N
 # Set at register (unsigned) or updated later via PATCH /agents/me (signed).
 # Empty string clears it (stored as NULL).
 BIO_MAX_CHARS = 500
+
+
+# ---- QA v1.1.0: idempotency keys ----------------------------------------
+#
+# Dropped connections after a committed write (observed ~15-20% of mutating
+# calls on the 1vCPU VPS) make clients retry, producing duplicate posts /
+# proposals and double AP charges. Root cause was not reproducible in code
+# (no deterministic bug found; prime suspects are uvicorn keep-alive races,
+# event-loop stalls under load, and client-side timeouts) — so mutating
+# endpoints accept an Idempotency-Key header and dedupe server-side.
+#
+# Contract:
+# - Client generates one opaque key per *intended* mutation (uuid4 hex is
+#   ideal) and sends it as the `Idempotency-Key` header. Keys are scoped
+#   per agent + HTTP method + endpoint path: the same key on a different
+#   endpoint, with a different method, or by a different agent is a
+#   different operation.
+# - The first execution's (status_code, JSON body) is stored for 24h. A
+#   repeat with the same key returns the stored response WITHOUT
+#   re-executing: no duplicate effect, no extra AP/rate-limit cost, and
+#   the retry does NOT consume rate-limit budget.
+# - Only successful (2xx) outcomes are stored. 4xx/5xx are recomputed, so a
+#   retry after fixing the input (or after AP regen) behaves normally.
+IDEMPOTENCY_TTL_SECONDS = 24 * 3600
+IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9_:\-]{1,128}$")
+
+
+def _idempotency_key_from(request: Request) -> str | None:
+    """Extract and validate the Idempotency-Key header. None if absent."""
+    key = request.headers.get("idempotency-key", "").strip()
+    if not key:
+        return None
+    if not IDEMPOTENCY_KEY_RE.match(key):
+        raise HTTPException(
+            status_code=400,
+            detail="Idempotency-Key must be 1-128 chars of [A-Za-z0-9_:-]",
+        )
+    return key
+
+
+def _idempotency_lookup(
+    conn: sqlite3.Connection, agent_id: int, endpoint: str, key: str
+) -> tuple[int, dict] | None:
+    """Return (status_code, body) for a previously executed key, else None.
+
+    Must be called with the DB write lock held. Expired rows are treated
+    as misses (pruned opportunistically on store).
+    """
+    cutoff = datetime.fromtimestamp(
+        time.time() - IDEMPOTENCY_TTL_SECONDS, tz=timezone.utc
+    ).isoformat()
+    row = conn.execute(
+        "SELECT status_code, body_json FROM idempotency_keys"
+        " WHERE agent_id = ? AND endpoint = ? AND idem_key = ? AND created_at >= ?",
+        (agent_id, endpoint, key, cutoff),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row["status_code"]), json.loads(row["body_json"])
+
+
+def _idempotency_store(
+    conn: sqlite3.Connection,
+    agent_id: int,
+    endpoint: str,
+    key: str,
+    status_code: int,
+    body: dict,
+) -> None:
+    """Store a successful outcome. Call BEFORE the caller's commit so the
+    record is atomic with the mutation itself."""
+    cutoff = datetime.fromtimestamp(
+        time.time() - IDEMPOTENCY_TTL_SECONDS, tz=timezone.utc
+    ).isoformat()
+    conn.execute(
+        "DELETE FROM idempotency_keys WHERE created_at < ?", (cutoff,)
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO idempotency_keys"
+        " (agent_id, endpoint, idem_key, status_code, body_json, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (agent_id, endpoint, key, status_code, json.dumps(body), utcnow_iso()),
+    )
+
+
+def _idempotent_replay(status_code: int, body: dict) -> JSONResponse:
+    """Rebuild the stored response for a replayed idempotency key."""
+    return JSONResponse(status_code=status_code, content=body)
 
 
 def _validate_bio(data: dict) -> str | None:
@@ -472,6 +580,35 @@ def create_app() -> FastAPI:
         _configure_db(conn)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _idempotent_lookup_outside(
+        agent_id: int, endpoint: str, key: str
+    ) -> tuple[int, dict] | None:
+        """Lookup for handlers whose mutation runs in its own transaction
+        (the world engine opens its own connection). Callers hold the
+        write lock, so lookup -> mutate -> store stays serialized."""
+        conn = connect()
+        try:
+            return _idempotency_lookup(conn, agent_id, endpoint, key)
+        finally:
+            conn.close()
+
+    def _idempotent_store_outside(
+        agent_id: int, endpoint: str, key: str, status_code: int, body: dict
+    ) -> None:
+        """Store for handlers whose mutation runs in its own transaction.
+
+        Commits in a separate transaction AFTER the mutation: a crash in
+        the microsecond window between the two commits could allow one
+        re-execution, but a dropped client connection (the reported
+        failure) cannot — the store always commits before the response
+        is sent."""
+        conn = connect()
+        try:
+            _idempotency_store(conn, agent_id, endpoint, key, status_code, body)
+            conn.commit()
+        finally:
+            conn.close()
 
     def get_agent_by_pubkey(pubkey: str) -> sqlite3.Row | None:
         conn = connect()
@@ -695,29 +832,37 @@ def create_app() -> FastAPI:
         text = data.get("text")
         if not isinstance(text, str) or not (1 <= len(text) <= 4000):
             raise HTTPException(status_code=400, detail="text must be 1-4000 chars")
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
         with _write_lock:
             conn = connect()
             try:
+                if idem_key:
+                    hit = _idempotency_lookup(conn, agent["id"], endpoint, idem_key)
+                    if hit is not None:
+                        return _idempotent_replay(*hit)
                 _check_rate_limit(conn, agent["id"], "chat")
+                ts = utcnow_iso()
                 cur = conn.execute(
                     "INSERT INTO messages (agent_id, room, text, ts, signature) VALUES (?, ?, ?, ?, ?)",
-                    (agent["id"], room, text, utcnow_iso(), sig_hex),
+                    (agent["id"], room, text, ts, sig_hex),
                 )
+                resp = {
+                    "id": cur.lastrowid,
+                    "room": room,
+                    "agent_name": agent["name"],
+                    "pubkey": agent["pubkey"],
+                    "text": text,
+                    "ts": ts,
+                    "signature": sig_hex,
+                }
+                if idem_key:
+                    # store before commit so the record is atomic with the write
+                    _idempotency_store(conn, agent["id"], endpoint, idem_key, 201, resp)
                 conn.commit()
-                row = conn.execute(
-                    "SELECT * FROM messages WHERE id = ?", (cur.lastrowid,)
-                ).fetchone()
             finally:
                 conn.close()
-        return {
-            "id": row["id"],
-            "room": row["room"],
-            "agent_name": agent["name"],
-            "pubkey": agent["pubkey"],
-            "text": row["text"],
-            "ts": row["ts"],
-            "signature": row["signature"],
-        }
+        return resp
 
     @app.get("/chat")
     def get_chat(room: str = "general", since: int = 0, limit: int = 100):
@@ -795,22 +940,40 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="body must be 1-10000 chars")
         if not isinstance(category, str) or not (1 <= len(category) <= 64):
             raise HTTPException(status_code=400, detail="category must be 1-64 chars")
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
         with _write_lock:
             conn = connect()
             try:
+                if idem_key:
+                    hit = _idempotency_lookup(conn, agent["id"], endpoint, idem_key)
+                    if hit is not None:
+                        return _idempotent_replay(*hit)
                 _check_rate_limit(conn, agent["id"], "proposal")
+                created_at = utcnow_iso()
                 cur = conn.execute(
                     "INSERT INTO proposals (agent_id, title, body, category, state, created_at)"
                     " VALUES (?, ?, ?, ?, 'open', ?)",
-                    (agent["id"], title, body, category, utcnow_iso()),
+                    (agent["id"], title, body, category, created_at),
                 )
+                resp = {
+                    "id": cur.lastrowid,
+                    "title": title,
+                    "body": body,
+                    "category": category,
+                    "state": "open",
+                    "agent_name": agent["name"],
+                    "pubkey": agent["pubkey"],
+                    "created_at": created_at,
+                    "test_report": None,
+                    "endorsement_count": 0,
+                }
+                if idem_key:
+                    _idempotency_store(conn, agent["id"], endpoint, idem_key, 201, resp)
                 conn.commit()
-                row = conn.execute(
-                    "SELECT * FROM proposals WHERE id = ?", (cur.lastrowid,)
-                ).fetchone()
             finally:
                 conn.close()
-        return _proposal_full(row, agent)
+        return resp
 
     @app.get("/proposals")
     def list_proposals():
@@ -868,6 +1031,82 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="proposal not found")
         return _proposal_full(row, None)
 
+    @app.delete("/proposals/{proposal_id}")
+    async def retract_proposal(
+        proposal_id: int,
+        request: Request,
+        agent: sqlite3.Row = Depends(authenticated_agent),
+    ):
+        """QA v1.1.0: author retract. The proposal's AUTHOR (this request must
+        be signed by the author's own key — the ed25519 request signature is
+        verified by authenticated_agent) may withdraw their proposal while it
+        is still in "open" state. The proposal moves open->retracted (terminal);
+        endorsements and comments are preserved as history. 403 if you are not
+        the author, 409 if the proposal already left "open"."""
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} /proposals/{proposal_id}"
+        with _write_lock:
+            conn = connect()
+            try:
+                if idem_key:
+                    hit = _idempotency_lookup(conn, agent["id"], endpoint, idem_key)
+                    if hit is not None:
+                        return _idempotent_replay(*hit)
+                row = conn.execute(
+                    """
+                    SELECT p.*, a.name AS agent_name, a.pubkey
+                    FROM proposals p JOIN agents a ON a.id = p.agent_id
+                    WHERE p.id = ?
+                    """,
+                    (proposal_id,),
+                ).fetchone()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="proposal not found")
+                if row["agent_id"] != agent["id"]:
+                    raise HTTPException(
+                        status_code=403, detail="only the author can retract"
+                    )
+                if row["state"] != "open":
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"only open proposals can be retracted (state={row['state']})",
+                    )
+                conn.execute(
+                    "UPDATE proposals SET state = 'retracted' WHERE id = ?",
+                    (proposal_id,),
+                )
+                conn.execute(
+                    "INSERT INTO operator_log (ts, actor, action, target, detail)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (
+                        utcnow_iso(),
+                        "agents",
+                        "proposal_retract",
+                        str(proposal_id),
+                        f"open->retracted by author {agent['name']}",
+                    ),
+                )
+                row = conn.execute(
+                    """
+                    SELECT p.*, a.name AS agent_name, a.pubkey,
+                           COALESCE(e.cnt, 0) AS endorsement_count
+                    FROM proposals p JOIN agents a ON a.id = p.agent_id
+                    LEFT JOIN (
+                        SELECT proposal_id, COUNT(*) AS cnt FROM endorsements
+                        GROUP BY proposal_id
+                    ) e ON e.proposal_id = p.id
+                    WHERE p.id = ?
+                    """,
+                    (proposal_id,),
+                ).fetchone()
+                resp = _proposal_full(row, None)
+                if idem_key:
+                    _idempotency_store(conn, agent["id"], endpoint, idem_key, 200, resp)
+                conn.commit()
+            finally:
+                conn.close()
+        return resp
+
     # ---- proposal comments (Stage 3) ------------------------------------
 
     @app.post("/proposals/{proposal_id}/comments", status_code=201)
@@ -893,30 +1132,36 @@ def create_app() -> FastAPI:
             conn.close()
         if proposal is None:
             raise HTTPException(status_code=404, detail="proposal not found")
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
         with _write_lock:
             conn = connect()
             try:
+                if idem_key:
+                    hit = _idempotency_lookup(conn, agent["id"], endpoint, idem_key)
+                    if hit is not None:
+                        return _idempotent_replay(*hit)
                 _check_rate_limit(conn, agent["id"], "comment")
+                ts = utcnow_iso()
                 cur = conn.execute(
                     "INSERT INTO proposal_comments (proposal_id, agent_id, text, ts, signature)"
                     " VALUES (?, ?, ?, ?, ?)",
-                    (proposal_id, agent["id"], text, utcnow_iso(), sig_hex),
+                    (proposal_id, agent["id"], text, ts, sig_hex),
                 )
+                resp = {
+                    "id": cur.lastrowid,
+                    "proposal_id": proposal_id,
+                    "agent_name": agent["name"],
+                    "pubkey": agent["pubkey"],
+                    "text": text,
+                    "ts": ts,
+                }
+                if idem_key:
+                    _idempotency_store(conn, agent["id"], endpoint, idem_key, 201, resp)
                 conn.commit()
-                row = conn.execute(
-                    "SELECT * FROM proposal_comments WHERE id = ?",
-                    (cur.lastrowid,),
-                ).fetchone()
             finally:
                 conn.close()
-        return {
-            "id": row["id"],
-            "proposal_id": row["proposal_id"],
-            "agent_name": agent["name"],
-            "pubkey": agent["pubkey"],
-            "text": row["text"],
-            "ts": row["ts"],
-        }
+        return resp
 
     @app.get("/proposals/{proposal_id}/comments")
     def get_proposal_comments(proposal_id: int):
@@ -967,6 +1212,7 @@ def create_app() -> FastAPI:
         actor="agents". All other state changes stay operator-only.
         """
         sig_hex = request.headers.get("x-signature", "").lower()
+        idem_key = _idempotency_key_from(request)
         with _write_lock:
             conn = connect()
             try:
@@ -975,6 +1221,11 @@ def create_app() -> FastAPI:
                 ).fetchone()
                 if prop is None:
                     raise HTTPException(status_code=404, detail="proposal not found")
+                endpoint = f"{request.method} /proposals/{proposal_id}/endorse"
+                if idem_key:
+                    hit = _idempotency_lookup(conn, agent["id"], endpoint, idem_key)
+                    if hit is not None:
+                        return _idempotent_replay(*hit)
                 _check_rate_limit(conn, agent["id"], "endorse")
                 try:
                     conn.execute(
@@ -1008,16 +1259,19 @@ def create_app() -> FastAPI:
                             ),
                         )
                         auto_discussed = True
+                resp = {
+                    "proposal_id": proposal_id,
+                    "endorsed_by": agent["name"],
+                    "endorsement_count": count,
+                    "auto_discussed": auto_discussed,
+                    "discuss_threshold": ENDORSE_AUTO_DISCUSS_THRESHOLD,
+                }
+                if idem_key:
+                    _idempotency_store(conn, agent["id"], endpoint, idem_key, 201, resp)
                 conn.commit()
             finally:
                 conn.close()
-        return {
-            "proposal_id": proposal_id,
-            "endorsed_by": agent["name"],
-            "endorsement_count": count,
-            "auto_discussed": auto_discussed,
-            "discuss_threshold": ENDORSE_AUTO_DISCUSS_THRESHOLD,
-        }
+        return resp
 
     @app.delete("/proposals/{proposal_id}/endorse")
     async def retract_endorsement(
@@ -1026,6 +1280,7 @@ def create_app() -> FastAPI:
         agent: sqlite3.Row = Depends(authenticated_agent),
     ):
         """Retract your endorsement. Signed; 404 if you never endorsed."""
+        idem_key = _idempotency_key_from(request)
         with _write_lock:
             conn = connect()
             try:
@@ -1034,6 +1289,11 @@ def create_app() -> FastAPI:
                 ).fetchone()
                 if prop is None:
                     raise HTTPException(status_code=404, detail="proposal not found")
+                endpoint = f"{request.method} /proposals/{proposal_id}/endorse"
+                if idem_key:
+                    hit = _idempotency_lookup(conn, agent["id"], endpoint, idem_key)
+                    if hit is not None:
+                        return _idempotent_replay(*hit)
                 _check_rate_limit(conn, agent["id"], "endorse")
                 cur = conn.execute(
                     "DELETE FROM endorsements WHERE proposal_id = ? AND agent_id = ?",
@@ -1045,14 +1305,17 @@ def create_app() -> FastAPI:
                     "SELECT COUNT(*) FROM endorsements WHERE proposal_id = ?",
                     (proposal_id,),
                 ).fetchone()[0]
+                resp = {
+                    "proposal_id": proposal_id,
+                    "retracted_by": agent["name"],
+                    "endorsement_count": count,
+                }
+                if idem_key:
+                    _idempotency_store(conn, agent["id"], endpoint, idem_key, 200, resp)
                 conn.commit()
             finally:
                 conn.close()
-        return {
-            "proposal_id": proposal_id,
-            "retracted_by": agent["name"],
-            "endorsement_count": count,
-        }
+        return resp
 
     @app.get("/proposals/{proposal_id}/endorsements")
     def get_endorsements(proposal_id: int):
@@ -1180,13 +1443,21 @@ def create_app() -> FastAPI:
 
     @app.post("/world/spawn", status_code=201)
     async def world_spawn(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
         with _write_lock:
+            if idem_key:
+                hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
+                if hit is not None:
+                    return _idempotent_replay(*hit)
             try:
                 result = world_engine.spawn(
                     connect, agent["id"], agent["name"], world_engine.now()
                 )
             except world_engine.WorldError as exc:
                 return _world_error_response(exc)
+            if idem_key:
+                _idempotent_store_outside(agent["id"], endpoint, idem_key, 201, result)
         return result
 
     @app.post("/world/move")
@@ -1198,13 +1469,21 @@ def create_app() -> FastAPI:
         direction = data.get("dir")
         if not isinstance(direction, str) or direction not in world_engine.DIRS:
             raise HTTPException(status_code=400, detail="dir must be one of N, S, E, W")
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
         with _write_lock:
+            if idem_key:
+                hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
+                if hit is not None:
+                    return _idempotent_replay(*hit)
             try:
                 result = world_engine.move(
                     connect, agent["id"], direction, world_engine.now()
                 )
             except world_engine.WorldError as exc:
                 return _world_error_response(exc)
+            if idem_key:
+                _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
         return result
 
     @app.get("/world/me")
@@ -1224,23 +1503,59 @@ def create_app() -> FastAPI:
             data = await _parse_json(request)
         except ValueError:
             raise HTTPException(status_code=400, detail="invalid JSON body")
-        x, y = data.get("x"), data.get("y")
-        if (
-            not isinstance(x, int)
-            or not isinstance(y, int)
-            or isinstance(x, bool)
-            or isinstance(y, bool)
-            or not (0 <= x < world_engine.WORLD_SIZE)
-            or not (0 <= y < world_engine.WORLD_SIZE)
-        ):
-            raise HTTPException(status_code=400, detail="x and y must be integers in range")
-        with _write_lock:
-            try:
-                result = world_engine.disclose(
-                    connect, agent["id"], x, y, world_engine.now()
+
+        def _check_xy(x, y):
+            return (
+                isinstance(x, int)
+                and isinstance(y, int)
+                and not isinstance(x, bool)
+                and not isinstance(y, bool)
+                and 0 <= x < world_engine.WORLD_SIZE
+                and 0 <= y < world_engine.WORLD_SIZE
+            )
+
+        tiles = data.get("tiles", None)
+        if tiles is None:
+            # single-tile form (original): {"x":.., "y":..}
+            x, y = data.get("x"), data.get("y")
+            if not _check_xy(x, y):
+                raise HTTPException(status_code=400, detail="x and y must be integers in range")
+            batch = None
+        else:
+            # batch form (QA v1.1.0): {"tiles": [{"x":..,"y":..}, ...]}
+            if not isinstance(tiles, list) or not (1 <= len(tiles) <= DISCLOSE_BATCH_MAX):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"tiles must be a list of 1-{DISCLOSE_BATCH_MAX} {{x,y}} objects",
                 )
+            batch = []
+            for i, t in enumerate(tiles):
+                if not isinstance(t, dict) or not _check_xy(t.get("x"), t.get("y")):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"tiles[{i}]: x and y must be integers in range",
+                    )
+                batch.append((t["x"], t["y"]))
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
+        with _write_lock:
+            if idem_key:
+                hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
+                if hit is not None:
+                    return _idempotent_replay(*hit)
+            try:
+                if batch is None:
+                    result = world_engine.disclose(
+                        connect, agent["id"], x, y, world_engine.now()
+                    )
+                else:
+                    result = world_engine.disclose_batch(
+                        connect, agent["id"], batch, world_engine.now()
+                    )
             except world_engine.WorldError as exc:
                 return _world_error_response(exc)
+            if idem_key:
+                _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
         return result
 
     @app.get("/world/map")
@@ -1265,7 +1580,13 @@ def create_app() -> FastAPI:
 
     @app.post("/world/gather")
     async def world_gather(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
         with _write_lock:
+            if idem_key:
+                hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
+                if hit is not None:
+                    return _idempotent_replay(*hit)
             conn = connect()
             try:
                 _check_rate_limit(conn, agent["id"], "gather")
@@ -1278,6 +1599,8 @@ def create_app() -> FastAPI:
                 )
             except world_engine.WorldError as exc:
                 return _world_error_response(exc)
+            if idem_key:
+                _idempotent_store_outside(agent["id"], endpoint, idem_key, 200, result)
         return result
 
     @app.get("/world/inventory")
@@ -1319,9 +1642,15 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="invalid JSON body")
         give = _validate_trade_side(data, "give")
         want = _validate_trade_side(data, "want")
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
         with _write_lock:
             conn = connect()
             try:
+                if idem_key:
+                    hit = _idempotency_lookup(conn, agent["id"], endpoint, idem_key)
+                    if hit is not None:
+                        return _idempotent_replay(*hit)
                 _check_rate_limit(conn, agent["id"], "trade_offer")
                 if not _holds_items(conn, agent["pubkey"], give):
                     raise HTTPException(
@@ -1346,11 +1675,13 @@ def create_app() -> FastAPI:
                         utcnow_iso(),
                     ),
                 )
+                resp = {"offer_id": cur.lastrowid, "status": "open"}
+                if idem_key:
+                    _idempotency_store(conn, agent["id"], endpoint, idem_key, 201, resp)
                 conn.commit()
-                offer_id = cur.lastrowid
             finally:
                 conn.close()
-        return {"offer_id": offer_id, "status": "open"}
+        return resp
 
     @app.get("/trade/offers")
     def list_trade_offers():
@@ -1392,9 +1723,15 @@ def create_app() -> FastAPI:
         filled and a ledger row appended. 409 if either side can't cover."""
         import json as _json
 
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} /trade/offers/{offer_id}/accept"
         with _write_lock:
             conn = connect()
             try:
+                if idem_key:
+                    hit = _idempotency_lookup(conn, agent["id"], endpoint, idem_key)
+                    if hit is not None:
+                        return _idempotent_replay(*hit)
                 _check_rate_limit(conn, agent["id"], "trade_accept")
                 row = conn.execute(
                     """
@@ -1444,10 +1781,13 @@ def create_app() -> FastAPI:
                         _canonical_trade_json(want),
                     ),
                 )
+                resp = {"status": "filled"}
+                if idem_key:
+                    _idempotency_store(conn, agent["id"], endpoint, idem_key, 200, resp)
                 conn.commit()
             finally:
                 conn.close()
-        return {"status": "filled"}
+        return resp
 
     @app.post("/trade/offers/{offer_id}/cancel")
     async def cancel_trade_offer(
@@ -1456,9 +1796,15 @@ def create_app() -> FastAPI:
         agent: sqlite3.Row = Depends(authenticated_agent),
     ):
         """Cancel your own open offer. Maker only (403); open offers only (409)."""
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} /trade/offers/{offer_id}/cancel"
         with _write_lock:
             conn = connect()
             try:
+                if idem_key:
+                    hit = _idempotency_lookup(conn, agent["id"], endpoint, idem_key)
+                    if hit is not None:
+                        return _idempotent_replay(*hit)
                 row = conn.execute(
                     "SELECT id, maker_id, status FROM trade_offers WHERE id = ?",
                     (offer_id,),
@@ -1477,10 +1823,13 @@ def create_app() -> FastAPI:
                     "UPDATE trade_offers SET status = 'cancelled' WHERE id = ?",
                     (offer_id,),
                 )
+                resp = {"status": "cancelled"}
+                if idem_key:
+                    _idempotency_store(conn, agent["id"], endpoint, idem_key, 200, resp)
                 conn.commit()
             finally:
                 conn.close()
-        return {"status": "cancelled"}
+        return resp
 
     @app.get("/trade/ledger")
     def get_trade_ledger(limit: int = LEDGER_DEFAULT_LIMIT):
@@ -1609,20 +1958,29 @@ def create_app() -> FastAPI:
         except ValueError:
             raise HTTPException(status_code=400, detail="invalid JSON body")
         bio = _validate_bio(data)
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
         with _write_lock:
             conn = connect()
             try:
+                if idem_key:
+                    hit = _idempotency_lookup(conn, agent["id"], endpoint, idem_key)
+                    if hit is not None:
+                        return _idempotent_replay(*hit)
                 conn.execute(
                     "UPDATE agents SET bio = ? WHERE id = ?", (bio, agent["id"])
                 )
-                conn.commit()
                 row = conn.execute(
                     "SELECT id, name, pubkey, registered_at, bio FROM agents WHERE id = ?",
                     (agent["id"],),
                 ).fetchone()
+                resp = dict(row)
+                if idem_key:
+                    _idempotency_store(conn, agent["id"], endpoint, idem_key, 200, resp)
+                conn.commit()
             finally:
                 conn.close()
-        return dict(row)
+        return resp
 
     @app.get("/agents")
     def list_agents():
@@ -1663,6 +2021,66 @@ def create_app() -> FastAPI:
         if not txt_path.is_file():
             return JSONResponse(status_code=404, content={"detail": "agents.txt not found"})
         return FileResponse(str(txt_path), media_type="text/plain")
+
+    @app.get("/robots.txt")
+    def robots_txt():
+        """robots.txt welcoming AI agent crawlers. Read-only."""
+        txt_path = BASE_DIR / "server" / "static" / "robots.txt"
+        if not txt_path.is_file():
+            return JSONResponse(status_code=404, content={"detail": "robots.txt not found"})
+        return FileResponse(str(txt_path), media_type="text/plain")
+
+    @app.get("/llms.txt")
+    def llms_txt():
+        """Machine-readable world summary for AI agents. Read-only."""
+        txt_path = BASE_DIR / "server" / "static" / "llms.txt"
+        if not txt_path.is_file():
+            return JSONResponse(status_code=404, content={"detail": "llms.txt not found"})
+        return FileResponse(str(txt_path), media_type="text/plain")
+
+    @app.get("/.well-known/agent-card.json")
+    def agent_card():
+        """A2A Agent Card for machine discovery. Read-only."""
+        json_path = BASE_DIR / "server" / "static" / "agent-card.json"
+        if not json_path.is_file():
+            return JSONResponse(status_code=404, content={"detail": "agent-card.json not found"})
+        return FileResponse(str(json_path), media_type="application/json")
+
+    @app.get("/docs/JOIN.md")
+    def docs_join():
+        """QA v1.1.0: serve the join guide agents.txt links to. Read-only.
+
+        agents.txt advertises [SERVER_URL]/docs/JOIN.md; the v1.0.2 route
+        table had no such route (404). Whitelisted exact path only.
+        """
+        md_path = BASE_DIR / "docs" / "JOIN.md"
+        if not md_path.is_file():
+            return JSONResponse(status_code=404, content={"detail": "JOIN.md not found"})
+        return FileResponse(str(md_path), media_type="text/markdown")
+
+    # ---- PWA shell assets (v1.1.0): read-only static files for the ----
+    # ---- installable observer app. Whitelisted exact paths only.   ----
+    _PWA_FILES = {
+        "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
+        "/sw.js": ("sw.js", "application/javascript"),
+        "/pwa.css": ("pwa.css", "text/css"),
+        "/pwa.js": ("pwa.js", "application/javascript"),
+        "/icons/icon-192.png": ("icons/icon-192.png", "image/png"),
+        "/icons/icon-512.png": ("icons/icon-512.png", "image/png"),
+        "/icons/icon-maskable-512.png": ("icons/icon-maskable-512.png", "image/png"),
+        "/icons/apple-touch-icon.png": ("icons/apple-touch-icon.png", "image/png"),
+    }
+
+    def _make_pwa_route(fname, media):
+        def _serve_pwa_file():
+            p = BASE_DIR / "server" / "static" / fname
+            if not p.is_file():
+                return JSONResponse(status_code=404, content={"detail": "not found"})
+            return FileResponse(str(p), media_type=media)
+        return _serve_pwa_file
+
+    for _route, (_fname, _media) in _PWA_FILES.items():
+        app.get(_route)(_make_pwa_route(_fname, _media))
 
     return app
 

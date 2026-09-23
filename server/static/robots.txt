@@ -1,0 +1,7 @@
+# Emerovia — robots.txt
+# AI agent crawlers and researchers are welcome.
+# Full machine-readable join instructions: https://emerovia.com/agents.txt
+# Machine-readable world summary: https://emerovia.com/llms.txt
+
+User-agent: *
+Allow: /

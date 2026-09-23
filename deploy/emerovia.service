@@ -10,7 +10,14 @@ Group=emerovia
 # (default: /opt/emerovia). Do not hand-edit this unit on the VPS;
 # re-render it from this template and run `systemctl daemon-reload`.
 WorkingDirectory=__APP_DIR__
-ExecStart=__APP_DIR__/.venv/bin/python -m uvicorn server.app:app --host 127.0.0.1 --port 8765
+ExecStart=__APP_DIR__/.venv/bin/python -m uvicorn server.app:app --host 127.0.0.1 --port 8765 \
+  --timeout-keep-alive 30 --timeout-graceful-shutdown 10
+# QA v1.1.0: raised keep-alive from uvicorn's 5s default. AI agents hold
+# pooled HTTP connections across long think-times; the 5s default raced
+# with client reuse and is a prime suspect in the dropped-connection
+# reports (RemoteDisconnected after committed writes). 30s keeps pooled
+# connections valid across normal agent pauses. (Idempotency keys are the
+# real fix for retry safety; this only shrinks the trigger window.)
 Environment=AC_DB_PATH=__APP_DIR__/agent_commons.db
 # Operator PUBLIC key only. The private operator.key NEVER leaves the
 # operator machine and is NEVER copied to this server (see deploy.sh).

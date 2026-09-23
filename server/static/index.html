@@ -2,8 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#04060b">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Emerovia">
 <title>Emerovia — Observer View</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="stylesheet" href="/pwa.css">
+<script src="/pwa.js" defer></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -680,7 +689,35 @@ function startFollow(name) {
 document.getElementById("follow-x").addEventListener("click", function () { stopAuto(); });
 
 var drag = null;
+var ptrs = {};    // pointerId -> {x, y}; two pointers = pinch
+var pinchD0 = 0;
+function ptrList() { return Object.keys(ptrs).map(function (k) { return ptrs[k]; }); }
+function zoomAt(factor, clientX, clientY) {
+  // zoom the camera around a client point; same math as the wheel handler
+  var base = Math.min(cw, chh) / WORLD, scale = base * cam.tz;
+  var r = canvas.getBoundingClientRect();
+  var wx = (clientX - r.left - cw / 2) / scale + cam.cx;
+  var wy = (clientY - r.top - chh / 2) / scale + cam.cy;
+  cam.tz *= factor;
+  clampCam();
+  var ns = base * cam.tz;
+  cam.tcx = wx - (clientX - r.left - cw / 2) / ns;
+  cam.tcy = wy - (clientY - r.top - chh / 2) / ns;
+  clampCam();
+}
 canvas.addEventListener("pointerdown", function (e) {
+  ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+  if (ptrList().length === 2) {
+    // second finger down: cancel any drag, start pinch
+    var p = ptrList();
+    pinchD0 = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+    drag = null;
+    canvas.classList.remove("dragging");
+    stopAuto("pinch");
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    return;
+  }
+  if (ptrList().length > 2) return;
   drag = { x: e.clientX, y: e.clientY, moved: false };
   canvas.setPointerCapture(e.pointerId);
   canvas.classList.add("dragging");
@@ -698,6 +735,16 @@ canvas.addEventListener("pointermove", function (e) {
        : t ? "(" + tx + ", " + ty + ") · " + terrainWord(t.terrain) + (t.disclosed_by ? " · by " + t.disclosed_by : "")
            : "(" + tx + ", " + ty + ") · uncharted";
 
+  if (e.pointerId in ptrs) ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+  var pl = ptrList();
+  if (pl.length >= 2) {
+    var d = Math.hypot(pl[0].x - pl[1].x, pl[0].y - pl[1].y);
+    if (pinchD0 > 0 && d > 0) {
+      zoomAt(d / pinchD0, (pl[0].x + pl[1].x) / 2, (pl[0].y + pl[1].y) / 2);
+      pinchD0 = d;
+    }
+    return;
+  }
   if (drag) {
     var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     if (Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
@@ -709,9 +756,18 @@ canvas.addEventListener("pointermove", function (e) {
     }
   }
 });
+function endPointer(e) {
+  // rebuild the pointer map keeping only the still-active pointers
+  var keep = {};
+  for (var k in ptrs) { if (k != e.pointerId) keep[k] = ptrs[k]; }
+  ptrs = keep;
+  if (ptrList().length < 2) pinchD0 = 0;
+}
 canvas.addEventListener("pointerup", function (e) {
+  var wasTap = drag && !drag.moved && ptrList().length <= 1;
+  endPointer(e);
   canvas.classList.remove("dragging");
-  if (drag && !drag.moved) {
+  if (wasTap) {
     var base = Math.min(cw, chh) / WORLD, scale = base * cam.tz;
     var r = canvas.getBoundingClientRect();
     var wx = (e.clientX - r.left - cw / 2) / scale + cam.cx;
@@ -720,6 +776,11 @@ canvas.addEventListener("pointerup", function (e) {
     if (ag) openSpotlight(ag.name);
   }
   drag = null;
+});
+canvas.addEventListener("pointercancel", function (e) {
+  endPointer(e);
+  drag = null;
+  canvas.classList.remove("dragging");
 });
 canvas.addEventListener("wheel", function (e) {
   e.preventDefault();
