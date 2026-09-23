@@ -204,14 +204,20 @@ def _tithe_week(now_ts: float) -> int:
 
 
 # ---- Bible §7 — farming -----------------------------------------------------
+# Bible §11: 4 slots, 7200s growth, plant 2 AP, harvest 2 AP → 3 grain.
+# Plow (discovered tool, §8: "+1 farm yield while owned") variant: plant
+# 1 AP, harvest 2 AP → 4 grain. Verbs the Bible names: plant, harvest
+# (+plow as a tool). No till/tend verbs and no seed cost — the Bible
+# names neither; §3.3's "12 grain / 16 AP = 0.75/AP" math is AP-only
+# (4 slots × 3 yield = 12; 4 × (2+2) AP = 16). Farmed grain is
+# seasonless (§7): farming never consults SEASON_MULT.
 FARM_SLOTS = 4
-FARM_TILL_AP = 2
 FARM_PLANT_AP = 2
-FARM_TEND_AP = 1
-FARM_HARVEST_AP = 1
+FARM_HARVEST_AP = 2
+FARM_HARVEST_YIELD = 3
 FARM_GROW_SECONDS = 7200  # 2 real hours; ready_at is a timestamp, no ticks
-FARM_BASE_YIELD = 4
-FARM_PLOW_YIELD = 6  # while the owner holds a plow tool
+FARM_PLOW_PLANT_AP = 1
+FARM_PLOW_HARVEST_YIELD = 4
 
 # ---- Bible §8 — upkeep ------------------------------------------------------
 # Tithe per structure per 7-day week, in grain. Tracked per structure via
@@ -1902,29 +1908,29 @@ def tithe(connect, agent_id: int, now_ts: float, structure_id: int) -> dict:
         conn.close()
 
 
-def _farm_shelter(conn: sqlite3.Connection, pubkey: str,
-                   structure_id: int, now_ts: float) -> sqlite3.Row:
-    """Fetch an owned, kept-up shelter structure or raise."""
+def _farm_structure(conn: sqlite3.Connection, pubkey: str,
+                    structure_id: int, now_ts: float) -> sqlite3.Row:
+    """Fetch an owned, kept-up farm structure or raise."""
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT * FROM structures WHERE id = ? AND owner_pubkey = ?",
         (structure_id, pubkey),
     ).fetchone()
     if row is None:
-        raise FarmError(f"no shelter {structure_id} owned by you")
-    if row["kind"] != "shelter":
-        raise FarmError(f"structure {structure_id} is not a shelter")
-    # Bible §8: a derelict shelter's farm plots are inert.
+        raise FarmError(f"no farm {structure_id} owned by you")
+    if row["kind"] != "farm":
+        raise FarmError(f"structure {structure_id} is not a farm")
+    # Bible §4.2: a derelict farm's plots are inert.
     if _is_derelict(row["last_tithe_week"], now_ts):
         raise FarmError(
-            f"shelter {structure_id} is derelict — pay the tithe to restore it"
+            f"farm {structure_id} is derelict — pay the tithe to restore it"
         )
-    # Shelters raised before the farming chapter have no plot rows yet —
+    # Farms raised before the farming chapter have no plot rows yet —
     # backfill lazily (INSERT OR IGNORE keeps this idempotent).
     for slot in range(FARM_SLOTS):
         conn.execute(
             "INSERT OR IGNORE INTO farm_plots (structure_id, slot, state)"
-            " VALUES (?, ?, 'untilled')",
+            " VALUES (?, ?, 'empty')",
             (row["id"], slot),
         )
     return row
@@ -1932,13 +1938,14 @@ def _farm_shelter(conn: sqlite3.Connection, pubkey: str,
 
 def farm(connect, agent_id: int, now_ts: float, structure_id: int,
          action: str, slot: int | None = None) -> dict:
-    """Work a shelter's crop slots. Bible §7.
+    """Work a farm structure's crop slots. Bible §11.
 
-    till (2 AP): untilled → tilled. plant (2 AP + 1 grain): tilled →
-    growing, ready in 2h. tend (1 AP): growing → tended (tending a ready
-    crop wastes the action). harvest (1 AP): ready → 4 grain (6 with plow),
-    slot back to untilled. Slot states live in farm_plots; growth needs no
-    ticks — harvest is a pure ready_at comparison. All atomic.
+    plant (2 AP; 1 AP with plow): empty → growing, ready in 2h (ready_at,
+    no ticks). harvest (2 AP): ready → 3 grain (4 with plow), slot back
+    to empty. Readiness is derived: a growing slot whose ready_at has
+    passed is "ready". Farmed grain is seasonless (§7) — the season
+    table is never consulted here. No till/tend verbs, no seed cost: the
+    Bible names only plant/harvest (+plow variant). All atomic.
     """
     conn = connect()
     try:
@@ -1948,66 +1955,36 @@ def farm(connect, agent_id: int, now_ts: float, structure_id: int,
         pubkey = conn.execute(
             "SELECT pubkey FROM agents WHERE id = ?", (agent_id,)
         ).fetchone()["pubkey"]
-        shelter = _farm_shelter(conn, pubkey, structure_id, now_ts)
-        if action not in ("till", "plant", "tend", "harvest"):
+        farm_struct = _farm_structure(conn, pubkey, structure_id, now_ts)
+        if action not in ("plant", "harvest"):
             raise FarmError(f"unknown farm action {action!r}")
         if slot is None or isinstance(slot, bool) or not isinstance(slot, int) \
                 or not (0 <= slot < FARM_SLOTS):
             raise FarmError(f"slot must be an integer 0-{FARM_SLOTS - 1}")
         plot = conn.execute(
             "SELECT * FROM farm_plots WHERE structure_id = ? AND slot = ?",
-            (shelter["id"], slot),
+            (farm_struct["id"], slot),
         ).fetchone()
         state = plot["state"]
         # Readiness is derived: a growing slot whose ready_at has passed is
-        # "ready" (Bible §7's fourth state) without needing a tick to flip it.
+        # "ready" without needing a tick to flip it.
         ready_at = float(plot["ready_at"]) if plot["ready_at"] else None
         is_ready = state == "growing" and ready_at is not None and ready_at <= now_ts
         shown_state = "ready" if is_ready else state
-        if action == "till":
-            ap_cost = FARM_TILL_AP
-            if state != "untilled":
-                raise FarmError(f"slot {slot} is {state}, not untilled")
+        has_plow = _owns_tool(conn, pubkey, "plow")
+        if action == "plant":
+            ap_cost = FARM_PLOW_PLANT_AP if has_plow else FARM_PLANT_AP
+            if state != "empty":
+                raise FarmError(f"slot {slot} is {shown_state}, not empty")
             if st["ap"] < ap_cost:
                 raise InsufficientAP(st["ap"], ap_cost)
-            conn.execute(
-                "UPDATE farm_plots SET state = 'tilled' WHERE structure_id = ?"
-                " AND slot = ?",
-                (shelter["id"], slot),
-            )
-            new_state = "tilled"
-            yielded = 0
-            shown_state = new_state
-        elif action == "plant":
-            ap_cost = FARM_PLANT_AP
-            if state != "tilled":
-                raise FarmError(f"slot {slot} is {state}, not tilled")
-            if st["ap"] < ap_cost:
-                raise InsufficientAP(st["ap"], ap_cost)
-            _consume_materials(conn, pubkey, {"grain": 1})
             ready_at = now_ts + FARM_GROW_SECONDS
             conn.execute(
                 "UPDATE farm_plots SET state = 'growing', planted_at = ?,"
-                " ready_at = ?, tended = 0 WHERE structure_id = ? AND slot = ?",
-                (now_ts, ready_at, shelter["id"], slot),
+                " ready_at = ? WHERE structure_id = ? AND slot = ?",
+                (now_ts, ready_at, farm_struct["id"], slot),
             )
             new_state = "growing"
-            yielded = 0
-            shown_state = new_state
-        elif action == "tend":
-            ap_cost = FARM_TEND_AP
-            if state != "growing":
-                raise FarmError(f"slot {slot} is {shown_state}: nothing to tend")
-            if st["ap"] < ap_cost:
-                raise InsufficientAP(st["ap"], ap_cost)
-            # Tending a ready crop wastes the action (AP spent, no effect).
-            if not is_ready:
-                conn.execute(
-                    "UPDATE farm_plots SET tended = 1 WHERE structure_id = ?"
-                    " AND slot = ?",
-                    (shelter["id"], slot),
-                )
-            new_state = shown_state
             yielded = 0
         else:  # harvest
             ap_cost = FARM_HARVEST_AP
@@ -2017,7 +1994,7 @@ def farm(connect, agent_id: int, now_ts: float, structure_id: int,
                 raise FarmError(f"slot {slot} is not ready yet")
             if st["ap"] < ap_cost:
                 raise InsufficientAP(st["ap"], ap_cost)
-            yielded = FARM_PLOW_YIELD if _owns_tool(conn, pubkey, "plow") else FARM_BASE_YIELD
+            yielded = FARM_PLOW_HARVEST_YIELD if has_plow else FARM_HARVEST_YIELD
             inv = conn.execute(
                 "SELECT qty FROM inventories WHERE agent_pubkey = ? AND resource = 'grain'",
                 (pubkey,),
@@ -2032,11 +2009,11 @@ def farm(connect, agent_id: int, now_ts: float, structure_id: int,
                 (pubkey, yielded, yielded),
             )
             conn.execute(
-                "UPDATE farm_plots SET state = 'untilled', planted_at = NULL,"
+                "UPDATE farm_plots SET state = 'empty', planted_at = NULL,"
                 " ready_at = NULL, tended = 0 WHERE structure_id = ? AND slot = ?",
-                (shelter["id"], slot),
+                (farm_struct["id"], slot),
             )
-            new_state = "untilled"
+            new_state = "empty"
         new_ap = st["ap"] - ap_cost
         conn.execute(
             "UPDATE agent_world SET ap = ?, last_update = ? WHERE agent_id = ?",
@@ -2044,7 +2021,7 @@ def farm(connect, agent_id: int, now_ts: float, structure_id: int,
         )
         conn.commit()
         return {
-            "structure_id": shelter["id"],
+            "structure_id": farm_struct["id"],
             "slot": slot,
             "action": action,
             "state": new_state,

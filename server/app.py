@@ -1994,7 +1994,9 @@ def create_app() -> FastAPI:
 
     @app.post("/world/farm")
     async def world_farm(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
-        # Bible §7: till / plant / tend / harvest a shelter's crop slots.
+        # Bible §11: plant/harvest a farm structure's crop slots (1/5s
+        # each). plant 2 AP (1 AP with plow), harvest 2 AP → 3 grain
+        # (4 with plow). No till/tend, no seed cost.
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -2010,11 +2012,19 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="slot must be an integer")
         idem_key = _idempotency_key_from(request)
         endpoint = f"{request.method} {request.url.path}"
+        bucket = {"plant": "plant", "harvest": "harvest"}.get(action)
         with _write_lock:
             if idem_key:
                 hit = _idempotent_lookup_outside(agent["id"], endpoint, idem_key)
                 if hit is not None:
                     return _idempotent_replay(*hit)
+            conn = connect()
+            try:
+                if bucket is not None:
+                    _check_rate_limit(conn, agent["id"], bucket)
+                conn.commit()
+            finally:
+                conn.close()
             try:
                 result = world_engine.farm(
                     connect, agent["id"], world_engine.now(),

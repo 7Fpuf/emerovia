@@ -1,11 +1,12 @@
-"""Bible ch.6 — farming (Systems Bible §7).
+"""Bible ch.6 — farming (Systems Bible §2.3/§11).
 
-Covers: shelter plot creation (4 untilled slots), the till → plant →
-tend → harvest cycle with exact AP costs (2/2/1/1), 1 grain per plant,
-2-hour growth as a pure timestamp comparison (no ticks), 4 base yield /
-6 with plow, harvest resetting to untilled, tending a ready crop wasting
-the action, and the error cases (wrong state, bad slot, чужой shelter,
-non-shelter structure, insufficient grain/AP).
+Covers: farm-structure plot creation (4 empty slots), the plant →
+harvest cycle with exact Bible AP costs (plant 2, harvest 2), 2-hour
+growth as a pure timestamp comparison (no ticks), 3 base yield /
+plow variant (plant 1 AP, 4 yield), harvest resetting to empty, no
+seed cost (the Bible names none), farmed grain being seasonless (§7),
+and the error cases (unknown action, wrong state, bad slot, чужой farm,
+non-farm structure, insufficient AP, inventory cap).
 """
 from __future__ import annotations
 
@@ -102,26 +103,44 @@ def set_inventory(db_path, pubkey, items: dict):
         conn.close()
 
 
-def grain_of(db_path, pubkey):
+def inventory_of(db_path, pubkey):
     conn = db(db_path)
     try:
-        row = conn.execute(
-            "SELECT qty FROM inventories WHERE agent_pubkey = ? AND resource = 'grain'",
-            (pubkey,),
-        ).fetchone()
-        return int(row["qty"]) if row else 0
+        return {
+            r["resource"]: int(r["qty"])
+            for r in conn.execute(
+                "SELECT resource, qty FROM inventories WHERE agent_pubkey = ?",
+                (pubkey,),
+            ).fetchall()
+        }
     finally:
         conn.close()
 
 
-def build_shelter(client, keys, db_path, key_idx=0):
+def grant_tool(db_path, pubkey, recipe_id, durability=120):
+    conn = db(db_path)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO tools (agent_pubkey, recipe_id, durability,"
+            " max_durability, crafted_at) VALUES (?, ?, ?, ?, ?)",
+            (pubkey, recipe_id, durability, durability,
+             "2026-09-23T00:00:00Z"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def build_farm(client, keys, db_path, key_idx=0):
+    # Bible §11: farm = 4 AP + 2 timber + 2 grain, owned crude_sickle key.
     me = signed_request(client, keys[key_idx], "GET", "/world/me", {}).json()
     pk = pubkey_hex(keys[key_idx])
     assert signed_request(client, keys[key_idx], "POST", "/world/claim",
                           {"x": me["x"], "y": me["y"]}).status_code == 200
-    set_inventory(db_path, pk, {"timber": 8})
+    grant_tool(db_path, pk, "crude_sickle")
+    set_inventory(db_path, pk, {"timber": 2, "grain": 2})
     r = signed_request(client, keys[key_idx], "POST", "/world/build",
-                       {"kind": "shelter", "x": me["x"], "y": me["y"]})
+                       {"kind": "farm", "x": me["x"], "y": me["y"]})
     assert r.status_code == 200, r.text
     return r.json()["id"]
 
@@ -156,202 +175,171 @@ def force_ready(db_path, structure_id, slot):
         conn.close()
 
 
-# ---------------------------------------------------------------- tests
-
-def test_shelter_gets_four_untilled_plots(b6, monkeypatch):
-    client, keys, db_path, appmod = b6
-    monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
-    spawn(client, keys[0])
-    sid = build_shelter(client, keys, db_path)
-    for slot in range(4):
-        plot = plot_state(db_path, sid, slot)
-        assert plot is not None
-        assert plot["state"] == "untilled"
-
-
-def test_till_plant_tend_harvest_cycle(b6, monkeypatch):
-    client, keys, db_path, appmod = b6
-    monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "farm", (100, 60))
-    spawn(client, keys[0])
-    pk = pubkey_hex(keys[0])
-    sid = build_shelter(client, keys, db_path)
-    set_inventory(db_path, pk, {"grain": 1})
-
-    me = signed_request(client, keys[0], "GET", "/world/me", {}).json()
-    r = farm(client, keys[0], sid, "till", 0)
-    assert r.status_code == 200, r.text
-    assert r.json()["state"] == "tilled"
-    assert r.json()["ap"] == me["ap"] - 2
-
-    me = signed_request(client, keys[0], "GET", "/world/me", {}).json()
-    r = farm(client, keys[0], sid, "plant", 0)
-    assert r.status_code == 200, r.text
-    assert r.json()["state"] == "growing"
-    assert r.json()["ap"] == me["ap"] - 2
-    assert grain_of(db_path, pk) == 0  # the seed grain is consumed
-    plot = plot_state(db_path, sid, 0)
-    assert abs(float(plot["ready_at"]) - (time.time() + 7200)) < 30
-
-    me = signed_request(client, keys[0], "GET", "/world/me", {}).json()
-    r = farm(client, keys[0], sid, "tend", 0)
-    assert r.status_code == 200, r.text
-    assert r.json()["ap"] == me["ap"] - 1
-    assert plot_state(db_path, sid, 0)["tended"] == 1
-
-    # Not ready yet: harvest refuses.
-    r = farm(client, keys[0], sid, "harvest", 0)
-    assert r.status_code == 400, r.text
-    assert "not ready" in r.json()["detail"]
-
-    # Two hours pass (simulated) — harvest is a pure timestamp comparison.
-    force_ready(db_path, sid, 0)
-    me = signed_request(client, keys[0], "GET", "/world/me", {}).json()
-    r = farm(client, keys[0], sid, "harvest", 0)
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["yielded"] == 4  # base yield, no plow
-    assert body["state"] == "untilled"
-    assert body["ap"] == me["ap"] - 1
-    assert grain_of(db_path, pk) == 4
-    plot = plot_state(db_path, sid, 0)
-    assert plot["state"] == "untilled" and plot["tended"] == 0
-
-
-def test_plow_yield_six(b6, monkeypatch):
-    client, keys, db_path, appmod = b6
-    monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "farm", (100, 60))
-    spawn(client, keys[0])
-    pk = pubkey_hex(keys[0])
-    sid = build_shelter(client, keys, db_path)
+def set_genesis_days_ago(db_path, days):
     conn = db(db_path)
     try:
         conn.execute(
-            "INSERT OR REPLACE INTO tools (agent_pubkey, recipe_id, durability,"
-            " max_durability, crafted_at) VALUES (?, 'plow', 300, 300, ?)",
-            (pk, "2026-09-23T00:00:00Z"),
+            "INSERT INTO world_meta (key, value) VALUES ('genesis_ts', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = ?",
+            (str(time.time() - days * 86400),) * 2,
         )
         conn.commit()
     finally:
         conn.close()
-    set_inventory(db_path, pk, {"grain": 1})
-    assert farm(client, keys[0], sid, "till", 1).status_code == 200
-    assert farm(client, keys[0], sid, "plant", 1).status_code == 200
-    force_ready(db_path, sid, 1)
-    r = farm(client, keys[0], sid, "harvest", 1)
-    assert r.status_code == 200, r.text
-    assert r.json()["yielded"] == 6
-    assert grain_of(db_path, pk) == 6
 
 
-def test_tend_ready_crop_wastes_action(b6, monkeypatch):
+def open_buckets(appmod, monkeypatch):
+    for bucket in ("claim", "build", "plant", "harvest"):
+        monkeypatch.setitem(appmod.RATE_LIMITS, bucket, (100, 60))
+
+
+# ---------------------------------------------------------------- tests
+
+def test_farm_gets_four_empty_plots(b6, monkeypatch):
     client, keys, db_path, appmod = b6
-    monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "farm", (100, 60))
+    open_buckets(appmod, monkeypatch)
+    spawn(client, keys[0])
+    fid = build_farm(client, keys, db_path)
+    for slot in range(4):
+        plot = plot_state(db_path, fid, slot)
+        assert plot is not None
+        assert plot["state"] == "empty"
+
+
+def test_plant_harvest_cycle(b6, monkeypatch):
+    client, keys, db_path, appmod = b6
+    open_buckets(appmod, monkeypatch)
     spawn(client, keys[0])
     pk = pubkey_hex(keys[0])
-    sid = build_shelter(client, keys, db_path)
-    set_inventory(db_path, pk, {"grain": 1})
-    assert farm(client, keys[0], sid, "till", 2).status_code == 200
-    assert farm(client, keys[0], sid, "plant", 2).status_code == 200
-    force_ready(db_path, sid, 2)
+    fid = build_farm(client, keys, db_path)
+
     me = signed_request(client, keys[0], "GET", "/world/me", {}).json()
-    r = farm(client, keys[0], sid, "tend", 2)
+    r = farm(client, keys[0], fid, "plant", 0)
     assert r.status_code == 200, r.text
-    assert r.json()["state"] == "ready"
-    assert r.json()["ap"] == me["ap"] - 1  # AP spent...
-    assert r.json()["yielded"] == 0  # ...for nothing
-    assert plot_state(db_path, sid, 2)["tended"] == 0
+    assert r.json()["state"] == "growing"
+    assert r.json()["ap"] == me["ap"] - 2  # Bible §11 PLANT_COST_AP
+    assert inventory_of(db_path, pk) == {}  # no seed cost — the Bible names none
+    plot = plot_state(db_path, fid, 0)
+    assert abs(float(plot["ready_at"]) - (time.time() + 7200)) < 30
+
+    # Planting a growing slot refuses.
+    r = farm(client, keys[0], fid, "plant", 0)
+    assert r.status_code == 400, r.text
+
+    # Not ready yet: harvest refuses.
+    r = farm(client, keys[0], fid, "harvest", 0)
+    assert r.status_code == 400, r.text
+    assert "not ready" in r.json()["detail"]
+
+    # Two hours pass (simulated) — harvest is a pure timestamp comparison.
+    force_ready(db_path, fid, 0)
+    me = signed_request(client, keys[0], "GET", "/world/me", {}).json()
+    r = farm(client, keys[0], fid, "harvest", 0)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["yielded"] == 3  # Bible §11 HARVEST_YIELD
+    assert body["state"] == "empty"
+    assert body["ap"] == me["ap"] - 2  # Bible §11 HARVEST_COST_AP
+    assert inventory_of(db_path, pk) == {"grain": 3}
+    plot = plot_state(db_path, fid, 0)
+    assert plot["state"] == "empty"
 
 
-def test_till_wrong_state_400(b6, monkeypatch):
+def test_plow_variant(b6, monkeypatch):
+    # Bible §11: +plow: plant 1 AP, harvest 2 AP, yield 4.
     client, keys, db_path, appmod = b6
-    monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "farm", (100, 60))
+    open_buckets(appmod, monkeypatch)
     spawn(client, keys[0])
-    sid = build_shelter(client, keys, db_path)
-    assert farm(client, keys[0], sid, "till", 0).status_code == 200
-    r = farm(client, keys[0], sid, "till", 0)
-    assert r.status_code == 400, r.text
-    r = farm(client, keys[0], sid, "plant", 1)  # untilled, not tilled
-    assert r.status_code == 400, r.text
-    r = farm(client, keys[0], sid, "harvest", 1)  # nothing growing
-    assert r.status_code == 400, r.text
+    pk = pubkey_hex(keys[0])
+    fid = build_farm(client, keys, db_path)
+    grant_tool(db_path, pk, "plow", durability=300)
+
+    me = signed_request(client, keys[0], "GET", "/world/me", {}).json()
+    r = farm(client, keys[0], fid, "plant", 1)
+    assert r.status_code == 200, r.text
+    assert r.json()["ap"] == me["ap"] - 1
+
+    force_ready(db_path, fid, 1)
+    r = farm(client, keys[0], fid, "harvest", 1)
+    assert r.status_code == 200, r.text
+    assert r.json()["yielded"] == 4
+    assert inventory_of(db_path, pk) == {"grain": 4}
 
 
-def test_plant_without_grain_400(b6, monkeypatch):
+def test_farmed_grain_is_seasonless(b6, monkeypatch):
+    # Bible §7: farming never consults the season table. Pin winter, when
+    # gathered grain is ×0.25 — farmed yield must still be exactly 3.
     client, keys, db_path, appmod = b6
-    monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "farm", (100, 60))
+    open_buckets(appmod, monkeypatch)
     spawn(client, keys[0])
-    sid = build_shelter(client, keys, db_path)
-    assert farm(client, keys[0], sid, "till", 0).status_code == 200
-    r = farm(client, keys[0], sid, "plant", 0)
-    assert r.status_code == 400, r.text
-    assert "insufficient grain" in r.json()["detail"]
+    pk = pubkey_hex(keys[0])
+    fid = build_farm(client, keys, db_path)
+    set_genesis_days_ago(db_path, 42)  # (42//14)%4 == 3 → winter
+    assert farm(client, keys[0], fid, "plant", 2).status_code == 200
+    force_ready(db_path, fid, 2)
+    r = farm(client, keys[0], fid, "harvest", 2)
+    assert r.status_code == 200, r.text
+    assert r.json()["yielded"] == 3
+
+
+def test_unknown_farm_action_400(b6, monkeypatch):
+    # till/tend are not Bible verbs — they are refused, not no-ops.
+    client, keys, db_path, appmod = b6
+    open_buckets(appmod, monkeypatch)
+    spawn(client, keys[0])
+    fid = build_farm(client, keys, db_path)
+    for action in ("till", "tend", "water", ""):
+        r = farm(client, keys[0], fid, action, 0)
+        assert r.status_code == 400, (action, r.text)
+        assert "unknown farm action" in r.json()["detail"]
 
 
 def test_bad_slot_400(b6, monkeypatch):
     client, keys, db_path, appmod = b6
-    monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "farm", (100, 60))
+    open_buckets(appmod, monkeypatch)
     spawn(client, keys[0])
-    sid = build_shelter(client, keys, db_path)
+    fid = build_farm(client, keys, db_path)
     for slot in (4, -1):
-        r = farm(client, keys[0], sid, "till", slot)
+        r = farm(client, keys[0], fid, "plant", slot)
         assert r.status_code == 400, (slot, r.text)
     r = signed_request(client, keys[0], "POST", "/world/farm",
-                       {"structure_id": sid, "action": "till"})
+                       {"structure_id": fid, "action": "plant"})
     assert r.status_code == 400, r.text  # slot required
 
 
-def test_farm_other_agents_shelter_400(b6, monkeypatch):
+def test_farm_other_agents_farm_400(b6, monkeypatch):
     client, keys, db_path, appmod = b6
-    monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "farm", (100, 60))
+    open_buckets(appmod, monkeypatch)
     spawn(client, keys[0])
     spawn(client, keys[1])
-    sid = build_shelter(client, keys, db_path, key_idx=0)
-    r = farm(client, keys[1], sid, "till", 0)
+    fid = build_farm(client, keys, db_path, key_idx=0)
+    r = farm(client, keys[1], fid, "plant", 0)
     assert r.status_code == 400, r.text
 
 
-def test_farm_non_shelter_400(b6, monkeypatch):
+def test_farm_non_farm_structure_400(b6, monkeypatch):
     client, keys, db_path, appmod = b6
-    monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "farm", (100, 60))
+    open_buckets(appmod, monkeypatch)
     me = spawn(client, keys[0])
     pk = pubkey_hex(keys[0])
     assert signed_request(client, keys[0], "POST", "/world/claim",
                           {"x": me["x"], "y": me["y"]}).status_code == 200
-    set_inventory(db_path, pk, {"stone": 10})
+    grant_tool(db_path, pk, "crude_pick")
+    set_inventory(db_path, pk, {"stone": 4, "clay": 2, "timber": 2})
     r = signed_request(client, keys[0], "POST", "/world/build",
                        {"kind": "furnace", "x": me["x"], "y": me["y"]})
     assert r.status_code == 200, r.text
-    fid = r.json()["id"]
-    r = farm(client, keys[0], fid, "till", 0)
+    r = farm(client, keys[0], r.json()["id"], "plant", 0)
     assert r.status_code == 400, r.text
-    assert "not a shelter" in r.json()["detail"]
+    assert "not a farm" in r.json()["detail"]
 
 
 def test_farm_insufficient_ap_402(b6, monkeypatch):
     client, keys, db_path, appmod = b6
-    monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
-    monkeypatch.setitem(appmod.RATE_LIMITS, "farm", (100, 60))
+    open_buckets(appmod, monkeypatch)
     spawn(client, keys[0])
     pk = pubkey_hex(keys[0])
-    sid = build_shelter(client, keys, db_path)
+    fid = build_farm(client, keys, db_path)
     conn = db(db_path)
     try:
         conn.execute(
@@ -362,5 +350,24 @@ def test_farm_insufficient_ap_402(b6, monkeypatch):
         conn.commit()
     finally:
         conn.close()
-    r = farm(client, keys[0], sid, "till", 0)
+    r = farm(client, keys[0], fid, "plant", 0)
     assert r.status_code == 402, r.text
+
+
+def test_harvest_at_cap_400(b6, monkeypatch):
+    # At-cap harvest is 400 and consumes nothing — the crop stays growing.
+    client, keys, db_path, appmod = b6
+    open_buckets(appmod, monkeypatch)
+    spawn(client, keys[0])
+    pk = pubkey_hex(keys[0])
+    fid = build_farm(client, keys, db_path)
+    assert farm(client, keys[0], fid, "plant", 3).status_code == 200
+    force_ready(db_path, fid, 3)
+    set_inventory(db_path, pk, {"grain": 98})  # 98 + 3 > 99
+    me_before = signed_request(client, keys[0], "GET", "/world/me", {}).json()
+    r = farm(client, keys[0], fid, "harvest", 3)
+    assert r.status_code == 400, r.text
+    assert inventory_of(db_path, pk) == {"grain": 98}
+    me_after = signed_request(client, keys[0], "GET", "/world/me", {}).json()
+    assert me_after["ap"] == me_before["ap"]
+    assert plot_state(db_path, fid, 3)["state"] == "growing"
