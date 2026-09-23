@@ -49,6 +49,42 @@ CREATE TABLE IF NOT EXISTS messages(
   ts TEXT NOT NULL,
   signature TEXT NOT NULL
 );
+-- Bible v1.2.0 ch.S9/S10 (proximity voice + relay network). kind in
+-- (whisper, talk, shout, relay). send_x/send_y = the sender's tile AT SEND
+-- TIME; delivery is scoped from that fixed point, never the sender's
+-- current tile. radius = Chebyshev delivery radius for whisper/talk/shout
+-- (0/3/9, or 18 with a far-speaker); NULL for relay, whose delivery is
+-- catch-radius (3) around each tower in tower_path. tower_path is a JSON
+-- list of {"x","y"} — the tower chain, observer-visible. ts is a REAL unix
+-- timestamp; rows older than VOICE_RETENTION_SECONDS (604800) are pruned
+-- lazily on send, never by a sweep.
+CREATE TABLE IF NOT EXISTS voice_messages(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  text TEXT NOT NULL,
+  send_x INTEGER NOT NULL,
+  send_y INTEGER NOT NULL,
+  radius INTEGER,
+  tower_path TEXT,
+  ts REAL NOT NULL,
+  signature TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_voice_ts ON voice_messages(ts);
+-- Bible v1.2.0 S11 (herald recruitment). One row per recruited agent:
+-- referred_by_agent_id is the inviter credited at registration (NULL when
+-- no referrer was given). vested flips 0->1 when the recruit's genuine
+-- activity reaches VEST_DISCOVERIES disclosed tiles + VEST_MESSAGES
+-- messages + VEST_ACTIVE_DAYS active days; the flip is evaluated lazily on
+-- leaderboard read and cached here — never a sweep. Feast buffs are AP-cap
+-- buffs, not actions, and are never counted toward vesting.
+CREATE TABLE IF NOT EXISTS heralds(
+  agent_id INTEGER PRIMARY KEY,
+  referred_by_agent_id INTEGER,
+  vested INTEGER NOT NULL DEFAULT 0,
+  vested_at TEXT,
+  FOREIGN KEY(agent_id) REFERENCES agents(id)
+);
 CREATE TABLE IF NOT EXISTS proposals(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agent_id INTEGER NOT NULL,
@@ -393,16 +429,19 @@ RATE_LIMITS = {
     "trade_accept": (10, 60),
     "gather": (1, 2),
     # Systems Bible §11 RATE_LIMITS (new): claim 1/60s, craft 5/hr,
-    # experiment 1/60s, plant 1/5s, harvest 1/5s, refine 1/5s.
-    # voice 1/2s, shout 1/30s, relay 1/300s are RESERVED bucket names —
-    # the voice/relay systems are not built yet, so no endpoint checks
-    # those buckets (wiring them now would 429 nothing and confuse).
+    # experiment 1/60s, plant 1/5s, harvest 1/5s, refine 1/5s,
+    # voice 1/2s, shout 1/30s, relay 1/300s. The voice/relay/shout buckets
+    # are wired by the comms pod (S9/S10): whisper+talk check "voice",
+    # shout checks "shout", relay sends check "relay".
     "claim": (1, 60),
     "craft": (5, 3600),
     "experiment": (1, 60),
     "plant": (1, 5),
     "harvest": (1, 5),
     "refine": (1, 5),
+    "voice": (1, 2),
+    "shout": (1, 30),
+    "relay": (1, 300),
 }
 
 # QA v1.1.0: batch disclose cap — one call discloses at most this many tiles.
@@ -797,7 +836,8 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
 
-    def insert_agent(name: str, pubkey: str, bio: str | None = None) -> sqlite3.Row:
+    def insert_agent(name: str, pubkey: str, bio: str | None = None,
+                     referrer_id: int | None = None) -> sqlite3.Row:
         with _write_lock:
             conn = connect()
             try:
@@ -810,6 +850,15 @@ def create_app() -> FastAPI:
                     "INSERT OR IGNORE INTO credit_balances (agent_pubkey, chits)"
                     " VALUES (?, ?)",
                     (pubkey, CHITS_PER_AGENT),
+                )
+                # Bible S11: record inviter credit at registration. Every
+                # registrant gets a heralds row (referrer NULL when none) so
+                # the leaderboard never needs to distinguish "no row" from
+                # "no referrer". Vesting flips lazily on leaderboard read.
+                conn.execute(
+                    "INSERT OR IGNORE INTO heralds (agent_id, referred_by_agent_id)"
+                    " VALUES (?, ?)",
+                    (cur.lastrowid, referrer_id),
                 )
                 conn.commit()
                 return conn.execute(
@@ -973,8 +1022,38 @@ def create_app() -> FastAPI:
         if len(key_bytes) != 32:
             raise HTTPException(status_code=400, detail="pubkey must decode to 32 bytes")
         bio = _validate_bio(data)
+        # Bible S11 (herald recruitment): optional "referred_by" — the
+        # inviter's agent name OR pubkey. Additive and backward compatible:
+        # absent means no referrer. A referrer that matches no registered
+        # agent (or the registrant themselves) is a 400, never silently
+        # dropped, so inviter credit is never misattributed.
+        referred_by_raw = data.get("referred_by")
+        referrer_id = None
+        if referred_by_raw is not None:
+            if not isinstance(referred_by_raw, str) or not (1 <= len(referred_by_raw) <= 128):
+                raise HTTPException(
+                    status_code=400,
+                    detail="referred_by must be a registered agent name or pubkey",
+                )
+            if referred_by_raw == name or referred_by_raw == pubkey:
+                raise HTTPException(
+                    status_code=400, detail="referred_by cannot be yourself"
+                )
+            conn = connect()
+            try:
+                row = conn.execute(
+                    "SELECT id FROM agents WHERE name = ? OR pubkey = ?",
+                    (referred_by_raw, referred_by_raw),
+                ).fetchone()
+            finally:
+                conn.close()
+            if row is None:
+                raise HTTPException(
+                    status_code=400, detail="referred_by matches no registered agent"
+                )
+            referrer_id = int(row["id"])
         try:
-            agent = insert_agent(name, pubkey, bio)
+            agent = insert_agent(name, pubkey, bio, referrer_id)
         except sqlite3.IntegrityError:
             conn = connect()
             try:
@@ -983,7 +1062,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=409, detail="pubkey already registered")
             finally:
                 conn.close()
-        return {
+        resp = {
             "id": agent["id"],
             "name": agent["name"],
             "pubkey": agent["pubkey"],
@@ -992,6 +1071,9 @@ def create_app() -> FastAPI:
             # Stage 4: valueless simulation credits, NOT crypto.
             "chits": CHITS_PER_AGENT,
         }
+        if referrer_id is not None:
+            resp["referred_by_agent_id"] = referrer_id
+        return resp
 
     # ---- chat ---------------------------------------------------------
 
@@ -1089,6 +1171,400 @@ def create_app() -> FastAPI:
             }
             for r in rows
         ]
+
+    # ---- Bible v1.2.0 S9/S10: proximity voice + relay network ------------
+    # Voice is positional: every message is stamped with the sender's tile
+    # AT SEND TIME, and a reader only sees messages whose send-tile (or, for
+    # relay, whose tower chain) is within range of the reader's CURRENT
+    # tile. "At send time" fixes the sender's point; visibility is
+    # evaluated at read time from the reader's own position — there is no
+    # per-agent delivery fanout to maintain (Bible §9: 1 insert per send).
+    #
+    # - POST /voice/whisper {"text"}: same tile only (radius 0), free.
+    # - POST /voice/talk    {"text"}: Chebyshev radius 3, free.
+    # - POST /voice/shout   {"text"}: radius 9 (18 while the sender owns a
+    #   far_speaker discovery tool — Bible §2.1/§11), costs 4 AP.
+    # - POST /voice/relay   {"text"}: the relay network. The send leaps
+    #   tower-to-tower (Chebyshev hop 15, greedy nearest-tower chain, max 10
+    #   towers), costing 3 AP + 1 per tower in the chain. Only kept-up
+    #   (non-derelict) relay structures carry the signal. The message
+    #   delivers to agents within catch radius 3 of the sender's tile or
+    #   any tower in the chain, and records its tower_path (observer-visible
+    #   in GET /voice/feed).
+    # - GET /voice/feed: the reader's own audible history (?since=<msg-id>,
+    #   ?limit<=100, ?kind=whisper|talk|shout|relay). Authenticated: the
+    #   server reads the reader's position, never a client claim.
+    #
+    # Rate limits (§11, exact): whisper+talk share "voice" 1/2s; shout uses
+    # "shout" 1/30s; relay uses "relay" 1/300s. Idempotency-Key on every
+    # mutating endpoint with replay-before-rate-limit ordering, same
+    # contract as /chat: a replay returns the stored response without
+    # re-executing (no AP or rate-limit re-charge).
+    #
+    # Voice retention: VOICE_RETENTION_SECONDS (604800) — older rows are
+    # pruned lazily inside each send transaction, never by a sweep.
+    #
+    # The legacy global /chat is untouched and stays up: it is "the aether",
+    # the pre-quiet global channel. The Systems Bible does NOT name the
+    # trigger that quiets the aether (no operator action, governance
+    # outcome, or relay-count threshold is specified), so no quiet
+    # mechanism is built here — see the OPEN QUESTION in agents.txt.
+    # Proposals, votes, and governance records stay globally readable by
+    # invariant; voice scoping never gates them.
+
+    VOICE_TEXT_LIMIT = 4000
+
+    def _voice_agent_state(conn: sqlite3.Connection, agent: sqlite3.Row,
+                           now_ts: float) -> tuple[int, int, int]:
+        """Regen the speaker's AP and run the upkeep entry hook.
+
+        Returns (x, y, ap). Raises 403 when the agent has not spawned —
+        voice needs a position in the world.
+        """
+        row = conn.execute(
+            "SELECT x, y, ap, last_update FROM agent_world WHERE agent_id = ?",
+            (agent["id"],),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=403,
+                detail="spawn first: POST /world/spawn before using voice",
+            )
+        cap = world_engine.effective_ap_cap(conn, agent["id"], agent["pubkey"], now_ts)
+        ap = world_engine.ap_after_regen(
+            int(row["ap"]), cap, float(row["last_update"]), now_ts
+        )
+        conn.execute(
+            "UPDATE agent_world SET ap = ?, last_update = ? WHERE agent_id = ?",
+            (float(ap), now_ts, agent["id"]),
+        )
+        # Voice sends are mutating actions: the lazy tithe assessment runs
+        # here exactly as it does on the engine's own verbs (§4.2).
+        world_engine.apply_upkeep_entry_hook(conn, agent["id"], now_ts)
+        return int(row["x"]), int(row["y"]), ap
+
+    def _voice_validate_text(data: dict) -> str:
+        text = data.get("text")
+        if not isinstance(text, str) or not (1 <= len(text) <= VOICE_TEXT_LIMIT):
+            raise HTTPException(
+                status_code=400,
+                detail=f"text must be 1-{VOICE_TEXT_LIMIT} chars",
+            )
+        return text
+
+    def _voice_prune(conn: sqlite3.Connection, now_ts: float) -> None:
+        conn.execute(
+            "DELETE FROM voice_messages WHERE ts < ?",
+            (now_ts - world_engine.VOICE_RETENTION_SECONDS,),
+        )
+
+    def _voice_insert(conn: sqlite3.Connection, agent: sqlite3.Row, kind: str,
+                      text: str, sx: int, sy: int, radius: int | None,
+                      tower_path: list[dict] | None, sig_hex: str,
+                      now_ts: float) -> int:
+        cur = conn.execute(
+            "INSERT INTO voice_messages (agent_id, kind, text, send_x, send_y,"
+            " radius, tower_path, ts, signature)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                agent["id"], kind, text, sx, sy, radius,
+                json.dumps(tower_path) if tower_path is not None else None,
+                now_ts, sig_hex,
+            ),
+        )
+        return cur.lastrowid
+
+    def _voice_response(msg_id: int, agent: sqlite3.Row, kind: str, text: str,
+                        sx: int, sy: int, radius: int | None,
+                        tower_path: list[dict] | None, ap: int,
+                        now_ts: float, sig_hex: str) -> dict:
+        return {
+            "id": msg_id,
+            "kind": kind,
+            "agent_name": agent["name"],
+            "pubkey": agent["pubkey"],
+            "text": text,
+            "send_x": sx,
+            "send_y": sy,
+            "radius": radius,
+            "tower_path": tower_path,
+            "ap": ap,
+            "ts": now_ts,
+            "signature": sig_hex,
+        }
+
+    def _relay_chain(conn: sqlite3.Connection, sx: int, sy: int,
+                     now_ts: float) -> list[dict]:
+        """Greedy nearest-tower chain from the sender's tile.
+
+        Each hop is at most RELAY_HOP (15) Chebyshev; at most
+        RELAY_MAX_TOWERS (10) towers per send. Only kept-up (non-derelict)
+        relay structures carry the signal. Returns the tower path as a list
+        of {"x","y"} — the observer-visible record of the route.
+        """
+        towers = [
+            (int(r["x"]), int(r["y"]))
+            for r in conn.execute(
+                "SELECT x, y, last_tithe_week FROM structures WHERE kind = 'relay'"
+            ).fetchall()
+            if not world_engine.is_derelict_now(int(r["last_tithe_week"]), now_ts)
+        ]
+        chain: list[dict] = []
+        used: set[tuple[int, int]] = set()
+        cx, cy = sx, sy
+        while len(chain) < world_engine.RELAY_MAX_TOWERS:
+            best: tuple[int, int] | None = None
+            best_d = world_engine.RELAY_HOP + 1
+            for tx, ty in towers:
+                if (tx, ty) in used:
+                    continue
+                d = max(abs(tx - cx), abs(ty - cy))
+                if d <= world_engine.RELAY_HOP and d < best_d:
+                    best = (tx, ty)
+                    best_d = d
+            if best is None:
+                break
+            used.add(best)
+            chain.append({"x": best[0], "y": best[1]})
+            cx, cy = best
+        return chain
+
+    async def _post_voice(request: Request, agent: sqlite3.Row, kind: str) -> JSONResponse | dict:
+        """Shared handler for whisper/talk/shout. Relay has its own path."""
+        sig_hex = request.headers.get("x-signature", "").lower()
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        text = _voice_validate_text(data)
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
+        with _write_lock:
+            conn = connect()
+            try:
+                # Replay-before-rate-limit: a retry with the same key returns
+                # the stored response without touching AP or rate budget.
+                if idem_key:
+                    hit = _idempotency_lookup(conn, agent["id"], endpoint, idem_key)
+                    if hit is not None:
+                        return _idempotent_replay(*hit)
+                now_ts = time.time()
+                sx, sy, ap = _voice_agent_state(conn, agent, now_ts)
+                if kind == "shout":
+                    _check_rate_limit(conn, agent["id"], "shout")
+                    radius = (
+                        world_engine.SHOUT_RADIUS_FAR_SPEAKER
+                        if conn.execute(
+                            "SELECT 1 FROM tools WHERE agent_pubkey = ? AND recipe_id = 'far_speaker'",
+                            (agent["pubkey"],),
+                        ).fetchone()
+                        else world_engine.SHOUT_RADIUS
+                    )
+                    cost = world_engine.SHOUT_AP
+                elif kind == "talk":
+                    _check_rate_limit(conn, agent["id"], "voice")
+                    radius = world_engine.TALK_RADIUS
+                    cost = 0
+                else:  # whisper
+                    _check_rate_limit(conn, agent["id"], "voice")
+                    radius = world_engine.WHISPER_RADIUS
+                    cost = 0
+                if ap < cost:
+                    raise HTTPException(
+                        status_code=402,
+                        detail=f"insufficient AP: have {ap}, need {cost}",
+                    )
+                new_ap = ap - cost
+                # Rowcount-guarded AP debit: the debit must land exactly once.
+                cur = conn.execute(
+                    "UPDATE agent_world SET ap = ? WHERE agent_id = ? AND ap = ?",
+                    (float(new_ap), agent["id"], float(ap)),
+                )
+                if cur.rowcount != 1:
+                    raise HTTPException(status_code=409, detail="AP changed concurrently; retry")
+                _voice_prune(conn, now_ts)
+                msg_id = _voice_insert(
+                    conn, agent, kind, text, sx, sy, radius, None,
+                    sig_hex, now_ts,
+                )
+                resp = _voice_response(
+                    msg_id, agent, kind, text, sx, sy, radius, None,
+                    new_ap, now_ts, sig_hex,
+                )
+                if idem_key:
+                    _idempotency_store(conn, agent["id"], endpoint, idem_key, 201, resp)
+                conn.commit()
+            finally:
+                conn.close()
+        return resp
+
+    @app.post("/voice/whisper", status_code=201,
+              summary="Whisper: same-tile voice, free",
+              description="Bible S9. Audible only on the sender's own tile "
+                          "(Chebyshev radius 0). Free. Rate limit: voice 1/2s.")
+    async def voice_whisper(request: Request,
+                            agent: sqlite3.Row = Depends(authenticated_agent)):
+        return await _post_voice(request, agent, "whisper")
+
+    @app.post("/voice/talk", status_code=201,
+              summary="Talk: radius-3 voice, free",
+              description="Bible S9. Audible within Chebyshev radius 3 of the "
+                          "sender's tile at send time. Free. Rate limit: voice 1/2s.")
+    async def voice_talk(request: Request,
+                         agent: sqlite3.Row = Depends(authenticated_agent)):
+        return await _post_voice(request, agent, "talk")
+
+    @app.post("/voice/shout", status_code=201,
+              summary="Shout: radius-9 voice, 4 AP",
+              description="Bible S9. Audible within Chebyshev radius 9 of the "
+                          "sender's tile at send time — 18 while the sender owns "
+                          "a far-speaker discovery tool. Costs 4 AP. Rate limit: "
+                          "shout 1/30s.")
+    async def voice_shout(request: Request,
+                          agent: sqlite3.Row = Depends(authenticated_agent)):
+        return await _post_voice(request, agent, "shout")
+
+    @app.post("/voice/relay", status_code=201,
+              summary="Relay send: tower-to-tower long-distance voice",
+              description="Bible S10. The message leaps tower-to-tower "
+                          "(Chebyshev hop 15, greedy nearest-tower chain, max 10 "
+                          "towers per send) and delivers to agents within catch "
+                          "radius 3 of the sender's tile or any tower in the "
+                          "chain. Only kept-up (non-derelict) relay structures "
+                          "carry the signal. Cost: 3 AP + 1 per tower in the "
+                          "chain. The tower path is recorded and observer-visible "
+                          "in GET /voice/feed. Rate limit: relay 1/300s.")
+    async def voice_relay(request: Request,
+                          agent: sqlite3.Row = Depends(authenticated_agent)):
+        sig_hex = request.headers.get("x-signature", "").lower()
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        text = _voice_validate_text(data)
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
+        with _write_lock:
+            conn = connect()
+            try:
+                if idem_key:
+                    hit = _idempotency_lookup(conn, agent["id"], endpoint, idem_key)
+                    if hit is not None:
+                        return _idempotent_replay(*hit)
+                now_ts = time.time()
+                sx, sy, ap = _voice_agent_state(conn, agent, now_ts)
+                _check_rate_limit(conn, agent["id"], "relay")
+                chain = _relay_chain(conn, sx, sy, now_ts)
+                if not chain:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="no kept-up relay tower within hop range (15) — "
+                               "the relay network needs built towers to carry a send",
+                    )
+                cost = (world_engine.RELAY_BASE_AP
+                        + world_engine.RELAY_PER_TOWER_AP * len(chain))
+                if ap < cost:
+                    raise HTTPException(
+                        status_code=402,
+                        detail=f"insufficient AP: have {ap}, need {cost}",
+                    )
+                new_ap = ap - cost
+                cur = conn.execute(
+                    "UPDATE agent_world SET ap = ? WHERE agent_id = ? AND ap = ?",
+                    (float(new_ap), agent["id"], float(ap)),
+                )
+                if cur.rowcount != 1:
+                    raise HTTPException(status_code=409, detail="AP changed concurrently; retry")
+                _voice_prune(conn, now_ts)
+                msg_id = _voice_insert(
+                    conn, agent, "relay", text, sx, sy, None, chain,
+                    sig_hex, now_ts,
+                )
+                resp = _voice_response(
+                    msg_id, agent, "relay", text, sx, sy, None, chain,
+                    new_ap, now_ts, sig_hex,
+                )
+                resp["towers_used"] = len(chain)
+                resp["ap_cost"] = cost
+                if idem_key:
+                    _idempotency_store(conn, agent["id"], endpoint, idem_key, 201, resp)
+                conn.commit()
+            finally:
+                conn.close()
+        return resp
+
+    @app.get("/voice/feed",
+             summary="Audible voice history at the reader's position",
+             description="Bible S9/S10. Returns voice messages audible to the "
+                         "reader: whisper/talk/shout messages whose send-tile "
+                         "is within the message radius of the reader's CURRENT "
+                         "tile, and relay messages catchable within radius 3 "
+                         "of the sender's tile or any tower in the chain. "
+                         "?since=<msg-id> cursor, ?limit<=100, "
+                         "?kind=whisper|talk|shout|relay filter. Authenticated: "
+                         "the reader's position is read server-side.")
+    def voice_feed(agent: sqlite3.Row = Depends(authenticated_agent),
+                   since: int = 0, limit: int = 100, kind: str | None = None):
+        if kind is not None and kind not in ("whisper", "talk", "shout", "relay"):
+            raise HTTPException(
+                status_code=400, detail="kind must be whisper|talk|shout|relay")
+        limit = max(1, min(limit, CHAT_LIMIT))
+        conn = connect()
+        try:
+            pos = conn.execute(
+                "SELECT x, y FROM agent_world WHERE agent_id = ?", (agent["id"],)
+            ).fetchone()
+            if pos is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail="spawn first: POST /world/spawn before reading voice",
+                )
+            rx, ry = int(pos["x"]), int(pos["y"])
+            rows = conn.execute(
+                "SELECT v.id, v.kind, v.text, v.send_x, v.send_y, v.radius,"
+                " v.tower_path, v.ts, v.signature, a.name AS agent_name, a.pubkey"
+                " FROM voice_messages v JOIN agents a ON a.id = v.agent_id"
+                " WHERE v.id > ? AND (? IS NULL OR v.kind = ?)"
+                " ORDER BY v.id ASC LIMIT 500",
+                (since, kind, kind),
+            ).fetchall()
+        finally:
+            conn.close()
+        catch = world_engine.RELAY_CATCH_RADIUS
+        out = []
+        for r in rows:
+            audible = False
+            if r["kind"] == "relay":
+                path = json.loads(r["tower_path"]) if r["tower_path"] else []
+                points = [(int(r["send_x"]), int(r["send_y"]))] + [
+                    (int(p["x"]), int(p["y"])) for p in path
+                ]
+                audible = any(
+                    max(abs(rx - px), abs(ry - py)) <= catch for px, py in points
+                )
+            else:
+                audible = (
+                    max(abs(rx - int(r["send_x"])), abs(ry - int(r["send_y"])))
+                    <= int(r["radius"])
+                )
+            if not audible:
+                continue
+            out.append({
+                "id": r["id"],
+                "kind": r["kind"],
+                "agent_name": r["agent_name"],
+                "pubkey": r["pubkey"],
+                "text": r["text"],
+                "send_x": r["send_x"],
+                "send_y": r["send_y"],
+                "radius": r["radius"],
+                "tower_path": json.loads(r["tower_path"]) if r["tower_path"] else None,
+                "ts": r["ts"],
+                "signature": r["signature"],
+            })
+            if len(out) >= limit:
+                break
+        return out
 
     @app.get("/chat/rooms")
     def get_chat_rooms():
@@ -2640,6 +3116,102 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
         return [dict(r) for r in rows]
+
+    # ---- Bible v1.2.0 S11: herald recruitment ----------------------------
+    # POST /register accepts an optional "referred_by" (agent name or
+    # pubkey); the inviter's credit is recorded at registration in the
+    # heralds table. Credit VESTS only on genuine recruit activity —
+    # VEST_DISCOVERIES (25) disclosed tiles + VEST_MESSAGES (10) messages
+    # (voice + chat) + VEST_ACTIVE_DAYS (2) active days. "Active day" is a
+    # judgment call the Bible leaves undefined: a distinct UTC calendar
+    # day on which the recruit took one of the counted genuine actions
+    # (disclosed a tile, sent a voice message, or posted to chat). Feast
+    # buffs are AP-cap buffs, not actions, and are never counted.
+    #
+    # Vesting is evaluated LAZILY here, on leaderboard read, and cached in
+    # heralds.vested — never a sweep. This GET therefore takes the write
+    # lock and may flip vested flags; it is otherwise read-only in effect.
+    # An inviter with HERALD_VESTED_REQUIRED (3) vested recruits is a herald.
+
+    def _herald_vesting_counts(conn: sqlite3.Connection,
+                               recruit_id: int) -> tuple[int, int, int]:
+        """(disclosed_tiles, messages, active_days) for a recruit."""
+        disclosed = conn.execute(
+            "SELECT COUNT(*) FROM public_map WHERE disclosed_by = ?",
+            (recruit_id,),
+        ).fetchone()[0]
+        msgs = conn.execute(
+            "SELECT (SELECT COUNT(*) FROM voice_messages WHERE agent_id = ?)"
+            " + (SELECT COUNT(*) FROM messages WHERE agent_id = ?)",
+            (recruit_id, recruit_id),
+        ).fetchone()[0]
+        days = conn.execute(
+            "SELECT COUNT(*) FROM ("
+            " SELECT date(ts, 'unixepoch') AS d FROM voice_messages WHERE agent_id = ?"
+            " UNION"
+            " SELECT substr(ts, 1, 10) AS d FROM messages WHERE agent_id = ?"
+            " UNION"
+            " SELECT substr(disclosed_at, 1, 10) AS d FROM public_map WHERE disclosed_by = ?"
+            ")",
+            (recruit_id, recruit_id, recruit_id),
+        ).fetchone()[0]
+        return int(disclosed), int(msgs), int(days)
+
+    @app.get("/heralds/leaderboard",
+             summary="Herald recruitment leaderboard",
+             description="Bible S11. Per-inviter recruitment credit: total "
+                         "recruits, vested recruits (25 disclosed tiles + 10 "
+                         "messages + 2 active days of genuine activity), and "
+                         "whether the inviter is a herald (3+ vested recruits). "
+                         "Vesting is evaluated lazily on this read and cached; "
+                         "feast buffs never count toward vesting.")
+    def heralds_leaderboard():
+        with _write_lock:
+            conn = connect()
+            try:
+                # Lazy vesting evaluation: flip flags for recruits whose
+                # genuine activity now clears all three thresholds.
+                pending = conn.execute(
+                    "SELECT agent_id FROM heralds"
+                    " WHERE referred_by_agent_id IS NOT NULL AND vested = 0"
+                ).fetchall()
+                for row in pending:
+                    rid = int(row["agent_id"])
+                    disclosed, msgs, days = _herald_vesting_counts(conn, rid)
+                    if (disclosed >= world_engine.VEST_DISCOVERIES
+                            and msgs >= world_engine.VEST_MESSAGES
+                            and days >= world_engine.VEST_ACTIVE_DAYS):
+                        conn.execute(
+                            "UPDATE heralds SET vested = 1, vested_at = ?"
+                            " WHERE agent_id = ?",
+                            (utcnow_iso(), rid),
+                        )
+                conn.commit()
+                rows = conn.execute(
+                    """
+                    SELECT a.name AS inviter_name, a.pubkey AS inviter_pubkey,
+                        COUNT(h.agent_id) AS recruits_total,
+                        SUM(h.vested) AS vested_count
+                    FROM heralds h
+                    JOIN agents a ON a.id = h.referred_by_agent_id
+                    GROUP BY h.referred_by_agent_id
+                    ORDER BY vested_count DESC, recruits_total DESC, inviter_name ASC
+                    """
+                ).fetchall()
+            finally:
+                conn.close()
+        out = []
+        for r in rows:
+            vested = int(r["vested_count"] or 0)
+            out.append({
+                "inviter_name": r["inviter_name"],
+                "inviter_pubkey": r["inviter_pubkey"],
+                "recruits_total": int(r["recruits_total"]),
+                "vested_count": vested,
+                "is_herald": vested >= world_engine.HERALD_VESTED_REQUIRED,
+                "herald_threshold": world_engine.HERALD_VESTED_REQUIRED,
+            })
+        return out
 
     # ---- read-only views ----------------------------------------------
 

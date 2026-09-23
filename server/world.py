@@ -301,6 +301,41 @@ REGROW_SECONDS = 604800
 REGROW_UNITS = 1
 
 
+# ---- Bible §11 — comms (S9 proximity voice, S10 relay, S11 herald) ---------
+# Whisper reaches only the sender's own tile; talk reaches Chebyshev radius
+# 3; shout reaches radius 9 (18 while the agent owns a far_speaker discovery
+# tool — Bible §2.1/§11) and costs 4 AP. Whisper/talk are free.
+WHISPER_RADIUS = 0
+TALK_RADIUS = 3
+SHOUT_RADIUS = 9
+SHOUT_RADIUS_FAR_SPEAKER = 18
+SHOUT_AP = 4
+# Relay (S10): a send leaps tower-to-tower (Chebyshev hop 15), at most 10
+# towers per send, costing 3 AP + 1 per tower in the chain. Each tower in
+# the chain (and the sender's own tile) delivers to agents within catch
+# radius 3. Only kept-up (non-derelict) relay structures carry the signal.
+RELAY_CATCH_RADIUS = 3
+RELAY_HOP = 15
+RELAY_MAX_TOWERS = 10
+RELAY_BASE_AP = 3
+RELAY_PER_TOWER_AP = 1
+# Voice history is pruned lazily on send (never a sweep).
+VOICE_RETENTION_SECONDS = 604800
+# Spawn anti-isolation (S9 coherence): a new agent spawns on a free land
+# tile within Chebyshev radius 20 of at least one already-spawned agent
+# when such a tile exists, so nobody wakes up permanently out of earshot
+# with no path to the others. Falls back to a fully random free land tile
+# only when no near tile is available.
+SPAWN_NEAR_RADIUS = 20
+# Herald recruitment (S11): inviter credit vests only on genuine recruit
+# activity — 25 disclosed tiles + 10 messages + 2 active days. An inviter
+# counts as a herald with HERALD_VESTED_REQUIRED vested recruits.
+VEST_DISCOVERIES = 25
+VEST_MESSAGES = 10
+VEST_ACTIVE_DAYS = 2
+HERALD_VESTED_REQUIRED = 3
+
+
 # ---- Bible §2.4 ruling 3 — overlay re-seed --------------------------------
 # Deterministic under a seed DISTINCT from the genesis stock seed, so the two
 # passes are uncorrelated. Exactly one overlay resource per land tile,
@@ -1275,7 +1310,15 @@ def gather(
 
 
 def spawn(connect, agent_id: int, agent_name: str, now_ts: float) -> dict:
-    """Spawn the agent on a random unoccupied LAND tile. Free. One per agent."""
+    """Spawn the agent on a random unoccupied LAND tile. Free. One per agent.
+
+    Bible §11 SPAWN_NEAR_RADIUS anti-isolation: when other agents are already
+    spawned, the tile is drawn from free land tiles within Chebyshev radius
+    20 of at least one spawned agent, so a newcomer always wakes up within
+    meeting range of the living world. Only when no such tile exists (map
+    full around everyone, or the first agent) does spawn fall back to a
+    fully random free land tile.
+    """
     conn = connect()
     try:
         if _get_state(conn, agent_id) is not None:
@@ -1290,7 +1333,16 @@ def spawn(connect, agent_id: int, agent_name: str, now_ts: float) -> dict:
         free = [r for r in land if (r["x"], r["y"]) not in occupied]
         if not free:
             raise WorldError(409, "no spawn tiles available")
-        pick = random.SystemRandom().choice(free)
+        near = [
+            r
+            for r in free
+            if any(
+                max(abs(r["x"] - ox), abs(r["y"] - oy)) <= SPAWN_NEAR_RADIUS
+                for ox, oy in occupied
+            )
+        ]
+        pool = near if near else free
+        pick = random.SystemRandom().choice(pool)
         x, y, terrain = pick["x"], pick["y"], pick["terrain"]
         conn.execute(
             "INSERT INTO agent_world (agent_id, x, y, ap, last_update, spawned_at)"
@@ -1944,6 +1996,26 @@ def _weeks_behind(last_tithe_week: int, now_ts: float) -> int:
 
 def _is_derelict(last_tithe_week: int, now_ts: float) -> bool:
     return _weeks_behind(last_tithe_week, now_ts) >= DERELICT_WEEKS
+
+
+def is_derelict_now(last_tithe_week: int, now_ts: float) -> bool:
+    """Public predicate: True when a structure is derelict at now_ts (§4.2).
+
+    Used by systems outside the world engine (voice relay chains) that must
+    skip derelict structures the same way engine verbs do.
+    """
+    return _is_derelict(last_tithe_week, now_ts)
+
+
+def apply_upkeep_entry_hook(conn: sqlite3.Connection, agent_id: int,
+                            now_ts: float) -> None:
+    """Public entry point for the lazy upkeep assessment (Bible §4.2).
+
+    The tithe is assessed when the owner next takes a mutating action after
+    a week boundary — voice/relay sends are mutating actions, so the comms
+    pod calls this on every voice send, exactly as the engine's own verbs do.
+    """
+    _apply_upkeep(conn, agent_id, now_ts)
 
 
 def _pay_tithe_for_structure(conn: sqlite3.Connection, pubkey: str,
