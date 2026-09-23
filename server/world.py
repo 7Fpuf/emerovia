@@ -151,29 +151,45 @@ DISCOVERED_CRAFT_AP = 5
 EXPERIMENT_AP = 3
 RECIPE_DISCOVERY_SEED = "emerovia-discovery-v1"
 
-# ---- Bible §5 — refining + §6 buildings -------------------------------------
-# Refinery: 1 AP-batch... each recipe turns raw inputs into exactly 1
-# refined unit. A furnace (owned structure) is required.
+# ---- Bible §2.5/§5 — refining + §6 buildings --------------------------------
+# Bible §11 REFINE_RECIPES: each recipe turns raw inputs into exactly 2
+# refined units. Every smelt (iron/copper/glass/brick) burns 1 coal as
+# fuel; lumber and flour are mechanical (no fuel). Coal is never the
+# product of refining — only fuel or upkeep — so the fuel economy can't
+# loop into itself. A furnace (owned, kept-up structure) is required.
 REFINERY_RECIPES = {
-    # item: (inputs, ap_cost)
-    "lumber": ({"timber": 2}, 4),
-    "iron":   ({"iron_ore": 2}, 6),
-    "copper": ({"copper_ore": 2}, 6),
-    "glass":  ({"sand": 4}, 8),
-    "flour":  ({"grain": 3}, 2),
-    "brick":  ({"clay": 4}, 4),
+    # item: (inputs, ap_cost, output_qty)
+    "lumber": ({"timber": 3}, 3, 2),
+    "iron":   ({"iron_ore": 3, "coal": 1}, 3, 2),
+    "copper": ({"copper_ore": 3, "coal": 1}, 3, 2),
+    "glass":  ({"sand": 3, "coal": 1}, 3, 2),
+    "flour":  ({"grain": 2}, 2, 2),
+    "brick":  ({"clay": 2, "coal": 1}, 2, 2),
 }
-# Functional structures: fixed material + AP costs (§6). Flavor structures
-# (any other kind) cost 5 timber + 5 AP — Bible §6 names no flavor cost,
-# so this is a documented judgment call against free-structure spam.
+# Functional structures: fixed material + AP costs, Bible §11
+# STRUCTURE_COSTS. "custom" is the free-form kind (the Bible's answer to
+# free-form building): 4 AP + 4 timber. Kinds the Bible does not name do
+# not ship — unknown kinds are 400, not flavor.
 STRUCTURE_DEFS = {
-    "furnace": ({"stone": 10}, 10),
-    "mill":    ({"timber": 10}, 10),
-    "shelter": ({"timber": 8}, 8),
+    # kind: (inputs, ap_cost)
+    "shelter":  ({"timber": 3, "fiber": 1}, 3),
+    "farm":     ({"timber": 2, "grain": 2}, 4),
+    "workshop": ({"lumber": 4, "iron": 2}, 5),
+    "mill":     ({"lumber": 6, "iron": 2}, 6),
+    "relay":    ({"lumber": 6, "copper": 2, "glass": 2, "fiber": 2}, 8),
+    "embassy":  ({"lumber": 6, "brick": 2, "copper": 2, "glass": 2}, 10),
+    "furnace":  ({"stone": 4, "clay": 2, "timber": 2}, 6),
+    "custom":   ({"timber": 4}, 4),
 }
-FLAVOR_STRUCTURE_INPUTS = {"timber": 5}
-FLAVOR_STRUCTURE_AP = 5
-BUILDABLE_FUNCTIONAL = ("furnace", "mill", "shelter")
+# Bible §11 BUILDING_TOOL_REQUIREMENTS: the builder must OWN the tool
+# (row in tools); it is a key, never consumed.
+BUILDING_TOOL_REQUIREMENTS = {
+    "farm": "crude_sickle",
+    "workshop": "crude_axe",
+    "mill": "crude_axe",
+    "relay": "crude_pick",
+    "furnace": "crude_pick",
+}
 # Land claims: 6 per agent, claimed within a 3-tile (Chebyshev) radius of
 # the agent, 5 AP per claim action (Bible §11 CLAIM_COST_AP). Claims are
 # permanent (no release).
@@ -1069,23 +1085,14 @@ def _gather_yield(conn: sqlite3.Connection, pubkey: str, resource: str,
                   tooled: bool, now_ts: float) -> int:
     """Units per gather before the stock clamp.
 
-    Bare hands: flat 1. Tooled: 2 + season adj (tooled only). Mill timber
-    +1 (ch.5) and discovered bounty passives (ch.4) extend this function
-    when those chapters land.
+    Bare hands: flat 1. Tooled: 2 + season adj (tooled only), plus
+    discovered bounty passives (ch.4). NOTE: there is no mill gather
+    bonus — the Bible (§7/§11) defines tooled yield as 2 ± season only;
+    an earlier mill-timber +1 was cut in reconciliation.
     """
     if not tooled:
         return GATHER_BARE_YIELD
     y = max(1, GATHER_TOOLED_YIELD + _season_gather_adj(conn, resource, tooled, now_ts))
-    # Mill +1 timber while the owner holds a mill (ch.5). Derelict
-    # filtering lands with upkeep in ch.8.
-    if resource == "timber":
-        mill = conn.execute(
-            "SELECT 1 FROM structures WHERE owner_pubkey = ? AND kind = 'mill'"
-            " AND (? - last_tithe_week) < ? LIMIT 1",
-            (pubkey, _tithe_week(now_ts), DERELICT_WEEKS),
-        ).fetchone()
-        if mill is not None:
-            y += 1
     # Discovered bounty passives (ch.4): +1 on their resource while owned.
     bounty = BOUNTY_TOOL_FOR_RESOURCE.get(resource)
     if bounty is not None and _owns_tool(conn, pubkey, bounty):
@@ -1557,10 +1564,13 @@ def build(connect, agent_id: int, agent_name: str, now_ts: float, kind: str,
           description: str | None = None, purpose: str | None = None) -> dict:
     """Raise a structure on the agent's claimed land. Bible §6.
 
-    Functional kinds (furnace/mill/shelter) have fixed material + AP costs;
-    any other kind is flavor (5 timber + 5 AP — documented judgment call).
-    One structure per tile; land only; the builder must hold the claim.
-    Atomic: AP + materials + structure row commit together.
+    The 8 Bible kinds (§11 STRUCTURE_COSTS) have fixed material + AP
+    costs; "custom" is the free-form kind. Kinds the Bible does not name
+    are refused (400). Some kinds need an owned tool as a key (never
+    consumed — §11 BUILDING_TOOL_REQUIREMENTS). One structure per tile;
+    land only; the builder must hold the claim. Automatic settlement
+    detection runs after the raise (Bible §5.1). Atomic: AP + materials
+    + structure row commit together.
     """
     conn = connect()
     try:
@@ -1573,10 +1583,18 @@ def build(connect, agent_id: int, agent_name: str, now_ts: float, kind: str,
         if not isinstance(kind, str) or not kind.strip():
             raise BuildError("kind must be a non-empty string")
         kind = kind.strip().lower()
-        if kind in STRUCTURE_DEFS:
-            inputs, ap_cost = STRUCTURE_DEFS[kind]
-        else:
-            inputs, ap_cost = FLAVOR_STRUCTURE_INPUTS, FLAVOR_STRUCTURE_AP
+        if kind not in STRUCTURE_DEFS:
+            raise BuildError(
+                f"unknown structure kind {kind!r} — raisable kinds: "
+                + ", ".join(sorted(STRUCTURE_DEFS))
+            )
+        inputs, ap_cost = STRUCTURE_DEFS[kind]
+        tool_needed = BUILDING_TOOL_REQUIREMENTS.get(kind)
+        if tool_needed is not None and not _owns_tool(conn, pubkey, tool_needed):
+            raise BuildError(
+                f"raising a {kind} requires an owned {tool_needed}"
+                " (key, not consumed)"
+            )
         terrain = _tile_terrain(conn, x, y)
         if terrain is None:
             raise BuildError("no such tile")
@@ -1616,31 +1634,100 @@ def build(connect, agent_id: int, agent_name: str, now_ts: float, kind: str,
             ),
         )
         struct_id = cur.lastrowid
-        if kind == "shelter":
-            # Bible §7: 4 crop slots per farm, starting untilled.
+        if kind == "farm":
+            # Bible §11: 4 crop slots per farm, starting empty.
             for slot in range(FARM_SLOTS):
                 conn.execute(
                     "INSERT OR IGNORE INTO farm_plots (structure_id, slot, state)"
-                    " VALUES (?, ?, 'untilled')",
+                    " VALUES (?, ?, 'empty')",
                     (struct_id, slot),
                 )
+        formed = _maybe_form_settlement(conn, pubkey, x, y, now_ts)
         conn.commit()
-        return {
+        result = {
             "id": struct_id,
             "kind": kind,
             "x": x,
             "y": y,
             "ap": new_ap,
         }
+        if formed is not None:
+            result["settlement_formed"] = formed
+        return result
     finally:
         conn.close()
 
 
-def refine(connect, agent_id: int, now_ts: float, item: str) -> dict:
-    """Refine one unit of a refined good. Bible §5.
+# ---- Bible §5.1 — automatic settlement formation ---------------------------
+# ≥5 structures within Chebyshev ≤8, owned by ≥3 distinct agents.
+# Detection is lazy: evaluated on POST /build/raise only (bounded 17×17
+# indexed scan, never a sweep). Stewards = the distinct structure-owners
+# at formation. The raising agent is recorded as triggered_by and gets
+# the 7-day naming window (§5.2).
+SETTLE_FORM_STRUCTURES = 5
+SETTLE_FORM_RADIUS = 8
+SETTLE_FORM_AGENTS = 3
+SETTLE_NAME_WINDOW_SECONDS = 7 * 86400
 
-    Requires an owned furnace; consumes the recipe's raw inputs + AP;
-    produces exactly 1 unit into inventory (per-item cap applies).
+
+def _maybe_form_settlement(conn: sqlite3.Connection, raiser_pubkey: str,
+                           x: int, y: int, now_ts: float) -> int | None:
+    """Lazy settlement detection after a raise. Returns the new
+    settlement id, or None when no settlement forms.
+
+    Bounded: one indexed scan of structures within Chebyshev 8 of the
+    newly raised structure (the 17×17 window). Overlap rule (Bible is
+    silent — interpretation, documented): an existing settlement whose
+    center is within 8 of the new structure already represents the
+    cluster, so no second settlement forms for it.
+    """
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT owner_pubkey FROM structures"
+        " WHERE MAX(ABS(x - ?), ABS(y - ?)) <= ?",
+        (x, y, SETTLE_FORM_RADIUS),
+    ).fetchall()
+    if len(rows) < SETTLE_FORM_STRUCTURES:
+        return None
+    owners = {r["owner_pubkey"] for r in rows}
+    if len(owners) < SETTLE_FORM_AGENTS:
+        return None
+    clash = conn.execute(
+        "SELECT id FROM settlements WHERE MAX(ABS(center_x - ?),"
+        " ABS(center_y - ?)) <= ? LIMIT 1",
+        (x, y, SETTLE_FORM_RADIUS),
+    ).fetchone()
+    if clash is not None:
+        return None
+    cur = conn.execute(
+        "INSERT INTO settlements (name, center_x, center_y, formed_at,"
+        " triggered_by, name_window_ends) VALUES (NULL, ?, ?, ?, ?, ?)",
+        (x, y, now_ts, raiser_pubkey, now_ts + SETTLE_NAME_WINDOW_SECONDS),
+    )
+    sid = cur.lastrowid
+    for opk in sorted(owners):
+        conn.execute(
+            "INSERT OR IGNORE INTO settlement_stewards (settlement_id,"
+            " agent_pubkey) VALUES (?, ?)",
+            (sid, opk),
+        )
+    _ledger(
+        conn, sid, "formed", raiser_pubkey,
+        detail=f"center ({x},{y}): {len(rows)} structures,"
+               f" {len(owners)} distinct owners",
+    )
+    return sid
+
+
+def refine(connect, agent_id: int, now_ts: float, item: str) -> dict:
+    """Refine one batch of a refined good. Bible §2.5.
+
+    Requires an owned, kept-up furnace; consumes the recipe's raw inputs
+    (including 1 coal fuel for every smelt) + AP; produces exactly 2 units
+    into inventory. At-cap → 400 (never voids outputs): the cap is checked
+    BEFORE anything is consumed, so a refused refine costs nothing.
+    Rate limit 1/5s (Bible §11). Atomic: consume-then-produce in one
+    rowcount-guarded transaction (escrow discipline).
     """
     conn = connect()
     try:
@@ -1653,7 +1740,7 @@ def refine(connect, agent_id: int, now_ts: float, item: str) -> dict:
         recipe = REFINERY_RECIPES.get(item)
         if recipe is None:
             raise RefineError(f"unknown refinery recipe {item!r}")
-        inputs, ap_cost = recipe
+        inputs, ap_cost, output_qty = recipe
         if (
             conn.execute(
                 "SELECT 1 FROM structures WHERE owner_pubkey = ?"
@@ -1670,7 +1757,7 @@ def refine(connect, agent_id: int, now_ts: float, item: str) -> dict:
             (pubkey, item),
         ).fetchone()
         have = int(inv["qty"]) if inv is not None else 0
-        if have + 1 > inventory_cap(conn, pubkey):
+        if have + output_qty > inventory_cap(conn, pubkey):
             raise InventoryFull(item)
         _consume_materials(conn, pubkey, dict(inputs))
         new_ap = st["ap"] - ap_cost
@@ -1679,12 +1766,13 @@ def refine(connect, agent_id: int, now_ts: float, item: str) -> dict:
             (float(new_ap), now_ts, agent_id),
         )
         conn.execute(
-            "INSERT INTO inventories (agent_pubkey, resource, qty) VALUES (?, ?, 1)"
-            " ON CONFLICT(agent_pubkey, resource) DO UPDATE SET qty = qty + 1",
-            (pubkey, item),
+            "INSERT INTO inventories (agent_pubkey, resource, qty)"
+            " VALUES (?, ?, ?) ON CONFLICT(agent_pubkey, resource)"
+            " DO UPDATE SET qty = qty + ?",
+            (pubkey, item, output_qty, output_qty),
         )
         conn.commit()
-        return {"item": item, "gained": 1, "ap": new_ap}
+        return {"item": item, "gained": output_qty, "ap": new_ap}
     finally:
         conn.close()
 

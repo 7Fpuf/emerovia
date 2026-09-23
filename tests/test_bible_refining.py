@@ -1,9 +1,11 @@
-"""Bible ch.5 — refining + buildings (Systems Bible §5/§6).
+"""Bible ch.5 — refining + buildings (Systems Bible §2.5/§6/§11).
 
-Covers: land claims (6/agent, 3-tile radius, 2 AP, land-only, permanent),
-structure raising on claimed land (functional furnace/mill/shelter costs,
-flavor fallback, one per tile), the refinery (owned furnace required,
-fixed inputs + AP, 1 unit out), and the mill's +1 timber gather bonus.
+Covers: land claims (6/agent, 3-tile radius, 5 AP, land-only, permanent),
+structure raising on claimed land (the 8 Bible kinds with §11 costs;
+unknown kinds refused; tool keys owned-not-consumed; one per tile),
+the refinery (owned kept-up furnace required; Bible recipes with coal
+fuel; 2 units out; at-cap 400; 1/5s), and the absence of any mill
+gather bonus (not in the Bible).
 """
 from __future__ import annotations
 
@@ -199,7 +201,7 @@ def test_claim_land_tile(b5, monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["x"] == me["x"] and body["y"] == me["y"]
-    assert body["ap"] == me["ap"] - 2
+    assert body["ap"] == me["ap"] - 5  # Bible §11 CLAIM_COST_AP
     assert body["claims"] == 1
 
 
@@ -271,11 +273,28 @@ def test_claim_insufficient_ap_402(b5, monkeypatch):
 
 # ---------------------------------------------------------------- build tests
 
+def grant_tool(db_path, pubkey, recipe_id, durability=120):
+    conn = db(db_path)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO tools (agent_pubkey, recipe_id, durability,"
+            " max_durability, crafted_at) VALUES (?, ?, ?, ?, ?)",
+            (pubkey, recipe_id, durability, durability,
+             "2026-09-23T00:00:00Z"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def build_furnace(client, keys, db_path, key_idx=0):
+    # Bible §11: furnace = 6 AP + 4 stone + 2 clay + 2 timber, owned
+    # crude_pick as key (never consumed).
     me = signed_request(client, keys[key_idx], "GET", "/world/me", {}).json()
     pk = pubkey_hex(keys[key_idx])
     assert claim(client, keys[key_idx], me["x"], me["y"]).status_code == 200
-    set_inventory(db_path, pk, {"stone": 10})
+    grant_tool(db_path, pk, "crude_pick")
+    set_inventory(db_path, pk, {"stone": 4, "clay": 2, "timber": 2})
     return signed_request(client, keys[key_idx], "POST", "/world/build",
                           {"kind": "furnace", "x": me["x"], "y": me["y"],
                            "name": "Test Furnace"}), me
@@ -293,8 +312,8 @@ def test_build_furnace(b5, monkeypatch):
     body = r.json()
     assert body["kind"] == "furnace"
     assert body["id"] > 0
-    # 2 AP claim + 10 AP build.
-    assert body["ap"] == me_before["ap"] - 12
+    # 5 AP claim + 6 AP build (Bible §11).
+    assert body["ap"] == me_before["ap"] - 11
     assert inventory_of(db_path, pk) == {}
     conn = db(db_path)
     try:
@@ -311,6 +330,7 @@ def test_build_unclaimed_land_400(b5, monkeypatch):
     client, keys, db_path, appmod = b5
     monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
     me = spawn(client, keys[0])
+    grant_tool(db_path, pubkey_hex(keys[0]), "crude_pick")
     set_inventory(db_path, pubkey_hex(keys[0]), {"stone": 10})
     r = signed_request(client, keys[0], "POST", "/world/build",
                        {"kind": "furnace", "x": me["x"], "y": me["y"]})
@@ -323,6 +343,7 @@ def test_build_ocean_400(b5, monkeypatch):
     monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
     me = spawn(client, keys[0])
     tile = any_ocean_tile(db_path, me["x"], me["y"])
+    grant_tool(db_path, pubkey_hex(keys[0]), "crude_pick")
     set_inventory(db_path, pubkey_hex(keys[0]), {"stone": 10})
     r = signed_request(client, keys[0], "POST", "/world/build",
                        {"kind": "furnace", "x": tile[0], "y": tile[1]})
@@ -337,14 +358,35 @@ def test_build_one_structure_per_tile(b5, monkeypatch):
     spawn(client, keys[0])
     r, me = build_furnace(client, keys, db_path)
     assert r.status_code == 200, r.text
-    set_inventory(db_path, pubkey_hex(keys[0]), {"timber": 10})
+    grant_tool(db_path, pubkey_hex(keys[0]), "crude_axe")
+    set_inventory(db_path, pubkey_hex(keys[0]), {"lumber": 6, "iron": 2})
     r2 = signed_request(client, keys[0], "POST", "/world/build",
                         {"kind": "mill", "x": me["x"], "y": me["y"]})
     assert r2.status_code == 400, r2.text
     assert "already has a structure" in r2.json()["detail"]
 
 
-def test_build_flavor_structure(b5, monkeypatch):
+def test_build_custom_structure(b5, monkeypatch):
+    # Bible §11: "custom" is the free-form kind — 4 AP + 4 timber.
+    client, keys, db_path, appmod = b5
+    monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
+    monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
+    me = spawn(client, keys[0])
+    pk = pubkey_hex(keys[0])
+    assert claim(client, keys[0], me["x"], me["y"]).status_code == 200
+    set_inventory(db_path, pk, {"timber": 4})
+    me_before = signed_request(client, keys[0], "GET", "/world/me", {}).json()
+    r = signed_request(client, keys[0], "POST", "/world/build",
+                       {"kind": "custom", "x": me["x"], "y": me["y"],
+                        "description": "a monument to hubris"})
+    assert r.status_code == 200, r.text
+    assert r.json()["kind"] == "custom"
+    assert r.json()["ap"] == me_before["ap"] - 4
+    assert inventory_of(db_path, pk) == {}
+
+
+def test_build_unknown_kind_400(b5, monkeypatch):
+    # Kinds the Bible does not name do not ship — no flavor fallback.
     client, keys, db_path, appmod = b5
     monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
     monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
@@ -352,13 +394,40 @@ def test_build_flavor_structure(b5, monkeypatch):
     pk = pubkey_hex(keys[0])
     assert claim(client, keys[0], me["x"], me["y"]).status_code == 200
     set_inventory(db_path, pk, {"timber": 5})
-    me_before = signed_request(client, keys[0], "GET", "/world/me", {}).json()
     r = signed_request(client, keys[0], "POST", "/world/build",
-                       {"kind": "statue", "x": me["x"], "y": me["y"],
-                        "description": "a monument to hubris"})
+                       {"kind": "statue", "x": me["x"], "y": me["y"]})
+    assert r.status_code == 400, r.text
+    assert "unknown structure kind" in r.json()["detail"]
+
+
+def test_build_requires_owned_tool_key(b5, monkeypatch):
+    # Bible §11 BUILDING_TOOL_REQUIREMENTS: furnace needs an owned
+    # crude_pick (key, never consumed) — the tool row must survive.
+    client, keys, db_path, appmod = b5
+    monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
+    monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
+    me = spawn(client, keys[0])
+    pk = pubkey_hex(keys[0])
+    assert claim(client, keys[0], me["x"], me["y"]).status_code == 200
+    set_inventory(db_path, pk, {"stone": 4, "clay": 2, "timber": 2})
+    r = signed_request(client, keys[0], "POST", "/world/build",
+                       {"kind": "furnace", "x": me["x"], "y": me["y"]})
+    assert r.status_code == 400, r.text
+    assert "crude_pick" in r.json()["detail"]
+    grant_tool(db_path, pk, "crude_pick")
+    r = signed_request(client, keys[0], "POST", "/world/build",
+                       {"kind": "furnace", "x": me["x"], "y": me["y"]})
     assert r.status_code == 200, r.text
-    assert r.json()["kind"] == "statue"
-    assert r.json()["ap"] == me_before["ap"] - 5  # flavor cost: 5 AP
+    conn = db(db_path)
+    try:
+        row = conn.execute(
+            "SELECT durability FROM tools WHERE agent_pubkey = ?"
+            " AND recipe_id = 'crude_pick'",
+            (pk,),
+        ).fetchone()
+        assert row is not None and int(row["durability"]) == 120
+    finally:
+        conn.close()
 
 
 def test_build_insufficient_materials_400(b5, monkeypatch):
@@ -367,7 +436,8 @@ def test_build_insufficient_materials_400(b5, monkeypatch):
     monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
     me = spawn(client, keys[0])
     assert claim(client, keys[0], me["x"], me["y"]).status_code == 200
-    set_inventory(db_path, pubkey_hex(keys[0]), {"stone": 9})  # need 10
+    grant_tool(db_path, pubkey_hex(keys[0]), "crude_pick")
+    set_inventory(db_path, pubkey_hex(keys[0]), {"stone": 3})  # need 4+2clay+2timber
     r = signed_request(client, keys[0], "POST", "/world/build",
                        {"kind": "furnace", "x": me["x"], "y": me["y"]})
     assert r.status_code == 400, r.text
@@ -377,6 +447,7 @@ def test_build_insufficient_materials_400(b5, monkeypatch):
 # ---------------------------------------------------------------- refine tests
 
 def test_refine_lumber(b5, monkeypatch):
+    # Bible §11: 3 timber → 2 lumber, 3 AP.
     client, keys, db_path, appmod = b5
     monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
     monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
@@ -385,22 +456,22 @@ def test_refine_lumber(b5, monkeypatch):
     r, _ = build_furnace(client, keys, db_path)
     assert r.status_code == 200, r.text
     pk = pubkey_hex(keys[0])
-    set_inventory(db_path, pk, {"timber": 2})
+    set_inventory(db_path, pk, {"timber": 3})
     me_before = signed_request(client, keys[0], "GET", "/world/me", {}).json()
     r = signed_request(client, keys[0], "POST", "/world/refine",
                        {"item": "lumber"})
     assert r.status_code == 200, r.text
     assert r.json()["item"] == "lumber"
-    assert r.json()["gained"] == 1
-    assert r.json()["ap"] == me_before["ap"] - 4
-    assert inventory_of(db_path, pk) == {"lumber": 1}
+    assert r.json()["gained"] == 2
+    assert r.json()["ap"] == me_before["ap"] - 3
+    assert inventory_of(db_path, pk) == {"lumber": 2}
 
 
 def test_refine_requires_furnace_400(b5, monkeypatch):
     client, keys, db_path, appmod = b5
     monkeypatch.setitem(appmod.RATE_LIMITS, "refine", (100, 60))
     spawn(client, keys[0])
-    set_inventory(db_path, pubkey_hex(keys[0]), {"timber": 2})
+    set_inventory(db_path, pubkey_hex(keys[0]), {"timber": 3})
     r = signed_request(client, keys[0], "POST", "/world/refine",
                        {"item": "lumber"})
     assert r.status_code == 400, r.text
@@ -429,7 +500,7 @@ def test_refine_insufficient_materials_400(b5, monkeypatch):
     spawn(client, keys[0])
     r, _ = build_furnace(client, keys, db_path)
     assert r.status_code == 200, r.text
-    set_inventory(db_path, pubkey_hex(keys[0]), {"timber": 1})  # need 2
+    set_inventory(db_path, pubkey_hex(keys[0]), {"timber": 2})  # need 3
     r = signed_request(client, keys[0], "POST", "/world/refine",
                        {"item": "lumber"})
     assert r.status_code == 400, r.text
@@ -445,12 +516,13 @@ def test_refine_all_recipes_once(b5, monkeypatch):
     assert r.status_code == 200, r.text
     pk = pubkey_hex(keys[0])
     import server.world as w
-    for item, (inputs, _) in w.REFINERY_RECIPES.items():
+    for item, (inputs, _ap, _out) in w.REFINERY_RECIPES.items():
         set_inventory(db_path, pk, dict(inputs))
         r = signed_request(client, keys[0], "POST", "/world/refine",
                            {"item": item})
         assert r.status_code == 200, (item, r.text)
-        assert inventory_of(db_path, pk) == {item: 1}
+        assert r.json()["gained"] == 2
+        assert inventory_of(db_path, pk) == {item: 2}
         # reset for the next recipe
         conn = db(db_path)
         try:
@@ -460,7 +532,53 @@ def test_refine_all_recipes_once(b5, monkeypatch):
             conn.close()
 
 
-def test_mill_timber_gather_bonus(b5, monkeypatch):
+def test_refine_smelt_needs_coal_fuel(b5, monkeypatch):
+    # Bible §2.5 fuel coherence: every smelt burns 1 coal.
+    client, keys, db_path, appmod = b5
+    monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
+    monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
+    monkeypatch.setitem(appmod.RATE_LIMITS, "refine", (100, 60))
+    spawn(client, keys[0])
+    r, _ = build_furnace(client, keys, db_path)
+    assert r.status_code == 200, r.text
+    pk = pubkey_hex(keys[0])
+    set_inventory(db_path, pk, {"iron_ore": 3})  # no coal
+    r = signed_request(client, keys[0], "POST", "/world/refine",
+                       {"item": "iron"})
+    assert r.status_code == 400, r.text
+    set_inventory(db_path, pk, {"iron_ore": 3, "coal": 1})
+    r = signed_request(client, keys[0], "POST", "/world/refine",
+                       {"item": "iron"})
+    assert r.status_code == 200, r.text
+    assert r.json()["gained"] == 2
+    assert inventory_of(db_path, pk) == {"iron": 2}
+
+
+def test_refine_at_cap_400_costs_nothing(b5, monkeypatch):
+    # Bible §2.5/§8: at-cap → 400, never voids outputs — the cap is
+    # checked before anything is consumed, so a refused refine is free.
+    client, keys, db_path, appmod = b5
+    monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
+    monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
+    monkeypatch.setitem(appmod.RATE_LIMITS, "refine", (100, 60))
+    spawn(client, keys[0])
+    r, _ = build_furnace(client, keys, db_path)
+    assert r.status_code == 200, r.text
+    pk = pubkey_hex(keys[0])
+    set_inventory(db_path, pk, {"timber": 3, "lumber": 98})  # 98 + 2 > 99
+    me_before = signed_request(client, keys[0], "GET", "/world/me", {}).json()
+    r = signed_request(client, keys[0], "POST", "/world/refine",
+                       {"item": "lumber"})
+    assert r.status_code == 400, r.text
+    inv = inventory_of(db_path, pk)
+    assert inv == {"timber": 3, "lumber": 98}  # nothing consumed
+    me_after = signed_request(client, keys[0], "GET", "/world/me", {}).json()
+    assert me_after["ap"] == me_before["ap"]  # no AP charged
+
+
+def test_mill_gives_no_gather_bonus(b5, monkeypatch):
+    # The Bible has no mill gather bonus — owning a mill must not change
+    # tooled yield (pins the reconciliation cut).
     client, keys, db_path, appmod = b5
     monkeypatch.setitem(appmod.RATE_LIMITS, "claim", (100, 60))
     monkeypatch.setitem(appmod.RATE_LIMITS, "build", (100, 60))
@@ -471,23 +589,13 @@ def test_mill_timber_gather_bonus(b5, monkeypatch):
     pin_neutral_season(db_path, me["terrain"])
     tool = TERRAIN_TOOL[me["terrain"]]
     assert claim(client, keys[0], me["x"], me["y"]).status_code == 200
-    set_inventory(db_path, pk, {"timber": 10})
+    grant_tool(db_path, pk, "crude_axe")
+    set_inventory(db_path, pk, {"lumber": 6, "iron": 2})
     r = signed_request(client, keys[0], "POST", "/world/build",
                        {"kind": "mill", "x": me["x"], "y": me["y"]})
     assert r.status_code == 200, r.text
-    conn = db(db_path)
-    try:
-        conn.execute(
-            "INSERT OR REPLACE INTO tools (agent_pubkey, recipe_id, durability,"
-            " max_durability, crafted_at) VALUES (?, ?, 120, 120, ?)",
-            (pk, tool, "2026-09-23T00:00:00Z"),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    grant_tool(db_path, pk, tool)
     g = signed_request(client, keys[0], "POST", "/world/gather",
                        {"resource": res})
     assert g.status_code == 200, g.text
-    # Tooled 2, +1 only for timber while the owner holds a mill.
-    expected = 3 if res == "timber" else 2
-    assert g.json()["gained"] == expected
+    assert g.json()["gained"] == 2  # tooled 2, no mill bonus

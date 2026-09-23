@@ -246,7 +246,9 @@ CREATE TABLE IF NOT EXISTS settlements(
   center_y INTEGER NOT NULL,
   formed_at REAL NOT NULL,
   named_at REAL,
-  named_by TEXT
+  named_by TEXT,
+  triggered_by TEXT,
+  name_window_ends REAL
 );
 CREATE TABLE IF NOT EXISTS settlement_stewards(
   settlement_id INTEGER NOT NULL,
@@ -1919,7 +1921,8 @@ def create_app() -> FastAPI:
 
     @app.post("/world/build")
     async def world_build(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
-        # Bible §6: raise a structure (functional or flavor) on claimed land.
+        # Bible §6: raise a structure (8 Bible kinds, §11 costs) on claimed
+        # land. Unknown kinds are 400; some kinds need an owned tool key.
         try:
             data = await _parse_json(request)
         except ValueError:
