@@ -82,7 +82,7 @@
   .tbtn .kbd { opacity: .6; }
 
   /* ---------- layout ---------- */
-  #main { display: flex; height: calc(100vh - 58px); }
+  #main { display: flex; height: calc(100vh - 88px); }
   #stage { flex: 1; position: relative; min-width: 0; background: #02040a; overflow: hidden; }
   #map { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
   #map.dragging { cursor: grabbing; }
@@ -92,6 +92,27 @@
   }
   #scan { position: absolute; inset: 0; pointer-events: none; z-index: 5; opacity: .05;
     background: repeating-linear-gradient(0deg, #fff 0 1px, transparent 1px 3px); }
+
+  /* ---------- world wire ticker ---------- */
+  #ticker {
+    height: 30px; display: flex; align-items: stretch; flex: none;
+    background: #070b13; border-bottom: 1px solid var(--panel-border);
+    overflow: hidden; position: relative; z-index: 25;
+  }
+  #ticker-label {
+    flex: none; display: flex; align-items: center; padding: 0 12px;
+    font-family: "Chakra Petch", sans-serif; font-size: 10px; font-weight: 700; letter-spacing: 2px;
+    color: #04060b; background: var(--amber);
+  }
+  #ticker-view { flex: 1; overflow: hidden; position: relative; display: flex; align-items: center; }
+  #ticker-inner {
+    white-space: nowrap; display: inline-block; padding-left: 100%;
+    animation: tick-scroll 45s linear infinite; font-size: 12px; color: var(--muted);
+  }
+  #ticker-inner .tick-item { color: var(--text); margin: 0 6px; }
+  #ticker-inner .tick-sep { color: var(--amber); margin: 0 10px; font-size: 9px; }
+  @keyframes tick-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+  #ticker-view:hover #ticker-inner { animation-play-state: paused; }
 
   /* big moment banners */
   #banner-zone { position: absolute; top: 26px; left: 0; right: 0; display: flex; flex-direction: column; align-items: center; gap: 8px; pointer-events: none; z-index: 20; }
@@ -295,6 +316,8 @@
   </div>
 </div>
 
+<div id="ticker"><div id="ticker-label">WORLD WIRE</div><div id="ticker-view"><div id="ticker-inner"></div></div></div>
+
 <div id="main">
   <div id="stage">
     <canvas id="map"></canvas>
@@ -374,6 +397,11 @@ var autoFollow = true;
 var followName = null;     // agent being camera-followed
 var lastActionAt = 0, lastActionAgent = null;
 var feedCount = 0;
+var streaks = {};            // name -> {n, last} reveal streaks
+var tickerQ = [];            // recent headlines for the world wire
+var records = {};            // persistent world records
+try { records = JSON.parse(localStorage.getItem("emerovia_records") || "{}"); } catch (e) { records = {}; }
+function saveRecords() { try { localStorage.setItem("emerovia_records", JSON.stringify(records)); } catch (e) {} }
 
 /* camera */
 var cam = { cx: 32, cy: 32, z: 1, tcx: 32, tcy: 32, tz: 1 };
@@ -488,13 +516,15 @@ function drawAgent(a, scale, ox, oy, now) {
     ctx.globalAlpha = 1;
   }
 
-  // glow
-  var glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 3.2);
+  // glow (burns hotter while on a reveal streak)
+  var onFire = a.fireUntil && now < a.fireUntil;
+  var glowR = R * (onFire ? 4.8 : 3.2);
+  var glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
   glow.addColorStop(0, a.color);
   glow.addColorStop(1, "rgba(0,0,0,0)");
-  ctx.globalAlpha = 0.5;
+  ctx.globalAlpha = onFire ? 0.9 : 0.5;
   ctx.fillStyle = glow;
-  ctx.beginPath(); ctx.arc(cx, cy, R * 3.2, 0, 6.2832); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx, cy, glowR, 0, 6.2832); ctx.fill();
   ctx.globalAlpha = 1;
 
   // focus ring
@@ -523,11 +553,33 @@ function drawAgent(a, scale, ox, oy, now) {
   ctx.shadowBlur = 0;
 }
 
+function burst(wx, wy, color) {
+  var parts = [];
+  for (var i = 0; i < 26; i++) {
+    var a = Math.random() * 6.2832, sp = 1 + Math.random() * 3.2;
+    parts.push({ dx: Math.cos(a) * sp, dy: Math.sin(a) * sp });
+  }
+  effects.push({ kind: "burst", wx: wx, wy: wy, t0: performance.now(), color: color, parts: parts });
+}
+
 function drawEffects(scale, ox, oy, now) {
   for (var i = effects.length - 1; i >= 0; i--) {
     var e = effects[i];
     var age = (now - e.t0) / 1000;
     if (age > 1.4) { effects.splice(i, 1); continue; }
+    if (e.kind === "burst") {
+      var pb = worldToScreen(e.wx + 0.5, e.wy + 0.5, scale, ox, oy);
+      var kb = age / 1.4;
+      e.parts.forEach(function (pt) {
+        var px = pb[0] + pt.dx * kb * scale * 2.4;
+        var py = pb[1] + pt.dy * kb * scale * 2.4;
+        ctx.globalAlpha = (1 - kb) * 0.9;
+        ctx.fillStyle = e.color;
+        ctx.fillRect(px - 1.5, py - 1.5, 3, 3);
+      });
+      ctx.globalAlpha = 1;
+      continue;
+    }
     var p = worldToScreen(e.wx + 0.5, e.wy + 0.5, scale, ox, oy);
     var k = age / 1.4;
     // expanding ring
@@ -722,8 +774,26 @@ function addFeed(icon, html, kind) {
   item.appendChild(ic); item.appendChild(body);
   feedEl.insertBefore(item, feedEl.firstChild);
   feedCount++;
+  if (kind !== "move") {
+    var tmp = document.createElement("div"); tmp.innerHTML = html;
+    pushTicker(icon + " " + tmp.textContent.slice(0, 120));
+  }
   while (feedEl.children.length > 70) feedEl.removeChild(feedEl.lastChild);
   return item;
+}
+function pushTicker(headline) {
+  tickerQ.unshift(headline);
+  if (tickerQ.length > 12) tickerQ.pop();
+  renderTicker();
+}
+function renderTicker() {
+  var inner = document.getElementById("ticker-inner");
+  var rec = records.bestStreak ? "🏆 record reveal streak: " + records.bestStreak + " (" + records.bestStreakBy + ")" : null;
+  var items = tickerQ.slice();
+  if (rec) items.push(rec);
+  if (!items.length) { inner.innerHTML = '<span class="tick-item">The world is quiet… for now.</span>'; return; }
+  var html = items.map(function (h) { return '<span class="tick-item">' + esc(h) + "</span>"; }).join('<span class="tick-sep">◆</span>');
+  inner.innerHTML = html + '<span class="tick-sep">◆</span>' + html;
 }
 function showBanner(html, sub) {
   bannerQueue.push({ html: html, sub: sub });
@@ -817,14 +887,33 @@ async function pollWorld() {
       newTiles.forEach(function (t) {
         var who = t.disclosed_by || "someone";
         var col = (legend[t.terrain] && legend[t.terrain].color) || "#7ee0a3";
-        effects.push({ wx: t.x, wy: t.y, t0: performance.now(), color: col });
+        var nowMs = performance.now();
+        effects.push({ kind: "ping", wx: t.x, wy: t.y, t0: nowMs, color: col });
         var first = !terrainSeen[t.terrain];
         terrainSeen[t.terrain] = true;
+        // reveal streaks: reveals chained within 90s
+        var st = streaks[who] || { n: 0, last: 0 };
+        st.n = (nowMs - st.last < 90000) ? st.n + 1 : 1;
+        st.last = nowMs;
+        streaks[who] = st;
+        if (agents[who]) agents[who].fireUntil = nowMs + 20000;
         var msg = "<b>" + esc(who) + "</b> revealed <b>" + esc(terrainWord(t.terrain)) + "</b> at (" + t.x + ", " + t.y + ")";
-        addFeed("🗺️", msg, first ? "big" : "");
+        if (st.n >= 3) msg += " <b>🔥 x" + st.n + " ON FIRE</b>";
+        addFeed("🗺️", msg, (first || st.n >= 3) ? "big" : "");
         recordAction(who, "revealed <b>" + esc(terrainWord(t.terrain)) + "</b> at (" + t.x + ", " + t.y + ")");
-        if (first) showBanner("🌲 FIRST " + esc(terrainWord(t.terrain).toUpperCase()) + " REVEALED",
-          esc(who) + " charts the unknown at (" + t.x + ", " + t.y + ")");
+        if (first) {
+          burst(t.x, t.y, col);
+          showBanner("🌲 FIRST " + esc(terrainWord(t.terrain).toUpperCase()) + " REVEALED",
+            esc(who) + " charts the unknown at (" + t.x + ", " + t.y + ")");
+        }
+        if (st.n === 5 || st.n === 10 || st.n === 20) {
+          showBanner("🔥 " + esc(who).toUpperCase() + " IS ON FIRE",
+            st.n + " reveals in a row — the whole world is watching");
+        }
+        if (st.n >= 3 && st.n > (records.bestStreak || 0)) {
+          records.bestStreak = st.n; records.bestStreakBy = who; saveRecords();
+          showBanner("🏆 NEW WORLD RECORD", esc(who) + " sets the longest reveal streak: " + st.n);
+        }
       });
       }
     }
@@ -868,6 +957,8 @@ async function pollChat() {
   var fresh = msgs.filter(function (m) { return m.id > lastChatId; });
   fresh.forEach(function (m) {
     if (m.id > lastChatId) lastChatId = m.id;
+    var ca = agents[m.agent_name];
+    if (ca) effects.push({ kind: "ping", wx: ca.x, wy: ca.y, t0: performance.now(), color: "#22d3ee" });
     addFeed("💬", "<b>" + esc(m.agent_name) + ":</b> " + esc(m.text.length > 140 ? m.text.slice(0, 140) + "…" : m.text), "chat");
     recordAction(m.agent_name, "said “" + esc(m.text.length > 90 ? m.text.slice(0, 90) + "…" : m.text) + "”");
     appendChatMsg(m);
@@ -975,7 +1066,9 @@ function renderAgentTab() {
     var mid = document.createElement("div");
     var nm = document.createElement("div"); nm.className = "nm"; nm.textContent = n;
     var mt = document.createElement("div"); mt.className = "mt";
-    mt.textContent = "(" + a.x + ", " + a.y + ")" + (a.terrain ? " · " + terrainWord(a.terrain) : "");
+    var stc = streaks[n];
+    mt.textContent = "(" + a.x + ", " + a.y + ")" + (a.terrain ? " · " + terrainWord(a.terrain) : "") +
+      (stc && stc.n >= 3 && performance.now() - stc.last < 90000 ? " · 🔥x" + stc.n : "");
     mid.appendChild(nm); mid.appendChild(mt);
     var go = document.createElement("div"); go.className = "go"; go.textContent = "›";
     card.appendChild(dot); card.appendChild(mid); card.appendChild(go);
