@@ -297,6 +297,113 @@
   .empty-note { color: var(--muted); font-style: italic; font-size: 12.5px; padding: 14px 6px; text-align: center; }
   .sec-label { font-size: 10.5px; letter-spacing: 2px; color: var(--muted); text-transform: uppercase; margin: 14px 0 8px 2px; font-weight: 600; }
 
+  /* ---------- season badge (map) ---------- */
+  #season-badge {
+    position: absolute; top: 14px; right: 14px; z-index: 10;
+    display: none; align-items: center; gap: 8px;
+    background: var(--panel); border: 1px solid rgba(251,191,36,.45);
+    padding: 7px 13px; border-radius: 999px;
+    font-family: "Chakra Petch", sans-serif; font-size: 12px; font-weight: 700; letter-spacing: 1.5px;
+    color: var(--amber);
+  }
+  #season-badge.show { display: flex; }
+  #season-badge .sdays { color: var(--muted); font-weight: 500; letter-spacing: .5px; font-size: 11px; }
+
+  /* ---------- agent story + timeline (spotlight) ---------- */
+  #spotlight .story {
+    font-size: 12.5px; line-height: 1.55; color: #c4d2e4;
+    background: rgba(34,211,238,.05); border: 1px solid rgba(34,211,238,.2);
+    border-radius: 9px; padding: 9px 11px; margin: 10px 0 4px;
+  }
+  .tl-item {
+    display: flex; gap: 9px; padding: 7px 2px; font-size: 12px; line-height: 1.45;
+    border-top: 1px solid rgba(255,255,255,.05); color: #c4d2e4;
+  }
+  .tl-item:first-child { border-top: none; }
+  .tl-item .ic { flex: none; font-size: 13px; margin-top: 1px; }
+  .tl-item .tm { color: var(--muted); font-size: 10px; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .tl-item b { color: #fff; }
+  .tl-more {
+    display: block; width: 100%; margin-top: 8px;
+    font-family: "Chakra Petch", sans-serif; font-size: 11px; letter-spacing: 1px;
+    background: transparent; color: var(--cyan);
+    border: 1px solid rgba(34,211,238,.35); border-radius: 8px; padding: 7px; cursor: pointer;
+  }
+  .tl-more:hover { background: rgba(34,211,238,.1); }
+
+  /* ---------- economy tab ---------- */
+  .eco-season {
+    display: flex; align-items: center; gap: 10px; padding: 11px 12px;
+    background: rgba(251,191,36,.06); border: 1px solid rgba(251,191,36,.35);
+    border-radius: 10px; margin-bottom: 10px; font-size: 13px;
+  }
+  .eco-season .si { font-size: 20px; }
+  .eco-season b { color: var(--amber); }
+  .eco-season .sdays { color: var(--muted); font-size: 11.5px; margin-left: auto; }
+  .eco-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-bottom: 6px; }
+  .eco-stat { background: rgba(255,255,255,.025); border: 1px solid rgba(255,255,255,.06); border-radius: 9px; padding: 9px; text-align: center; }
+  .eco-stat .v { font-family: "Chakra Petch", monospace; font-size: 18px; font-weight: 700; color: #fff; }
+  .eco-stat .k { font-size: 9.5px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; margin-top: 2px; }
+  .eco-vol { font-size: 11.5px; color: var(--muted); padding: 8px 4px; line-height: 1.7; }
+  .eco-vol b { color: var(--text); }
+  .offer { padding: 9px 11px; background: rgba(255,255,255,.025); border: 1px solid rgba(255,255,255,.06); border-radius: 9px; margin-bottom: 7px; font-size: 12.5px; line-height: 1.5; }
+  .offer .om { color: var(--cyan); font-weight: 700; }
+  .offer .ot { color: var(--muted); font-size: 10.5px; margin-top: 3px; }
+  .offer .give { color: var(--green); } .offer .want { color: var(--amber); }
+  .chits-note { color: var(--muted); font-size: 10.5px; font-style: italic; padding: 6px 4px 10px; }
+
+  /* ---------- chat author links ---------- */
+  .cmsg .ca { cursor: pointer; }
+  .cmsg .ca:hover { text-decoration: underline; }
+
+  /* feed trade items */
+  .feed-item.k-trade { border-color: rgba(126,224,163,.35); background: rgba(126,224,163,.05); }
+
+  /* ---------- wave-2: heralds + world tab + settlement panel ---------- */
+  .hrow {
+    display: flex; align-items: center; gap: 10px; padding: 9px 10px; margin-bottom: 6px;
+    background: rgba(255,255,255,.025); border: 1px solid rgba(255,255,255,.05); border-radius: 9px;
+  }
+  .hrow .hnm { font-weight: 600; font-size: 13px; flex: 1; }
+  .hrow .hstar { color: #ffd700; font-size: 15px; }
+  .hrow .hval { font-family: "Chakra Petch", monospace; font-size: 13px; color: var(--green); }
+  .hrow .hval small { color: var(--muted); font-size: 10.5px; }
+  .wsec { font-size: 10.5px; letter-spacing: 2px; color: var(--muted); text-transform: uppercase; margin: 14px 0 8px 2px; font-weight: 600; }
+  .wcard {
+    padding: 10px 12px; background: rgba(255,255,255,.025);
+    border: 1px solid rgba(255,255,255,.06); border-radius: 10px; margin-bottom: 8px;
+    font-size: 12.5px; line-height: 1.5;
+  }
+  .wcard.clickable { cursor: pointer; transition: all .15s; }
+  .wcard.clickable:hover { border-color: rgba(251,191,36,.45); transform: translateX(2px); }
+  .wcard .wt { font-weight: 700; font-size: 13.5px; }
+  .wcard .wm { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+  .wcard .wm b { color: var(--text); }
+  .wcard .wbad { color: var(--red); font-weight: 600; }
+  .slotbar { height: 7px; background: rgba(255,255,255,.07); border-radius: 4px; margin: 4px 0 7px; overflow: hidden; }
+  .slotbar i { display: block; height: 100%; border-radius: 4px; transition: width .6s ease; }
+  .slotbar .g0 { background: rgba(255,255,255,.15); }
+  .slotbar .g1 { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
+  .slotbar .g2 { background: linear-gradient(90deg, #7ee0a3, #22d3ee); }
+  .slotrow { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); }
+  .slotrow .sidx { font-family: "Chakra Petch", monospace; width: 42px; flex: none; color: var(--cyan); }
+  .slotrow .sst { width: 74px; flex: none; font-weight: 600; }
+  .slotrow .slotbar { flex: 1; margin: 2px 0; }
+  #settle-panel {
+    position: absolute; top: 64px; right: 14px; width: 302px; z-index: 15;
+    background: var(--panel); border: 1px solid rgba(251,191,36,.35);
+    border-radius: 14px; padding: 16px; display: none;
+    box-shadow: 0 12px 40px rgba(0,0,0,.6);
+    animation: banner-in .3s ease;
+    max-height: calc(100% - 160px); overflow-y: auto;
+  }
+  #settle-panel.show { display: block; }
+  #settle-panel h3 { margin: 0; font-size: 17px; color: var(--amber); }
+  #settle-panel .sp-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  #settle-panel .close-x { position: absolute; top: 10px; right: 12px; background: none; border: none; color: var(--muted); font-size: 16px; cursor: pointer; }
+  #settle-panel .close-x:hover { color: #fff; }
+  #settle-panel .fly { margin-top: 10px; width: 100%; }
+
   @media (max-width: 920px) {
     #main { flex-direction: column; }
     #stage { min-height: 46vh; }
@@ -333,8 +440,10 @@
     <div id="vignette"></div>
     <div id="scan"></div>
     <div id="banner-zone"></div>
+    <div id="season-badge"></div>
     <div id="follow-chip"><span id="follow-label"></span><button id="follow-x" title="stop following">✕</button></div>
     <div id="spotlight"></div>
+    <div id="settle-panel"></div>
     <div id="legend"></div>
     <div id="hud-coords">—</div>
   </div>
@@ -344,9 +453,12 @@
       <button data-tab="feed" class="active">FEED</button>
       <button data-tab="agents">AGENTS</button>
       <button data-tab="ranks">RANKS</button>
+      <button data-tab="heralds">HERALDS</button>
+      <button data-tab="world">WORLD</button>
       <button data-tab="chat">CHAT</button>
       <button data-tab="props">VOTES</button>
       <button data-tab="ops">OPS</button>
+      <button data-tab="economy">ECONOMY</button>
     </div>
     <div class="tabpage active" id="tab-feed"></div>
     <div class="tabpage" id="tab-agents"></div>
@@ -354,9 +466,12 @@
       <div id="rank-metric"></div>
       <div id="rank-rows"></div>
     </div>
+    <div class="tabpage" id="tab-heralds"></div>
+    <div class="tabpage" id="tab-world"></div>
     <div class="tabpage" id="tab-chat"></div>
     <div class="tabpage" id="tab-props"></div>
     <div class="tabpage" id="tab-ops"></div>
+    <div class="tabpage" id="tab-economy"></div>
   </aside>
 </div>
 
@@ -381,6 +496,25 @@ function fmtClock(ts) {
 function terrainWord(t) {
   var m = { ocean: "ocean", plains: "plains", forest: "forest", desert: "desert", mountain: "mountain" };
   return m[t] || String(t || "land");
+}
+function cap(s) { s = String(s || ""); return s.charAt(0).toUpperCase() + s.slice(1); }
+function fmtDate(ts) {
+  var d = new Date(ts); if (isNaN(d.getTime())) return "";
+  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+/* {item: qty} -> "2 grain, 10 chits"; chits are labeled sim credits, never value */
+function fmtItems(obj) {
+  obj = obj || {};
+  var ks = Object.keys(obj);
+  if (!ks.length) return "nothing";
+  return ks.map(function (k) {
+    var qty = obj[k];
+    return qty + " " + (k === "chits" ? "chits (sim credits)" : k);
+  }).join(", ");
+}
+function seasonIcon(s) {
+  var m = { spring: "🌸", summer: "☀️", autumn: "🍂", winter: "❄️" };
+  return m[s] || "◈";
 }
 async function getJSON(url) {
   var r = await fetch(url, { cache: "no-store" });
@@ -412,6 +546,34 @@ var records = {};            // persistent world records
 try { records = JSON.parse(localStorage.getItem("emerovia_records") || "{}"); } catch (e) { records = {}; }
 function saveRecords() { try { localStorage.setItem("emerovia_records", JSON.stringify(records)); } catch (e) {} }
 
+/* ---- v1.3.0 observer state: seasons, settlements, economy, timelines ---- */
+var seasonInfo = null;       // latest /world/info.seasons
+var lastSeasonIdx = null;    // for season-turnover detection
+var settlements = null;      // null until GET /world/settlements answers (spec pending)
+var propsCache = [];         // last /proposals list (for timelines + stories)
+var opsCache = [];           // last /operator-log rows (for timelines)
+var tradeLedgerCache = null; // session cache of /trade/ledger (for timelines)
+var lastTradeId = 0, tradesBooted = false;
+var worldChatCache = null;   // session cache of /chat?order=desc (for timelines)
+var recipesKnown = null;     // set of discovered recipe_ids (graceful: endpoint is signed-only)
+var ecoCache = null;         // last /stats/economy
+
+/* ---- wave-2 observer state: structures, relays, feasts, heralds ---- */
+var structures = null;       // null until GET /world/structures answers
+var structsKnown = {};       // id -> true (new-structure feed events)
+var structsBooted = false;
+var relays = null;           // {towers, chains} or null
+var lastChainId = 0, chainsBooted = false;
+var feasts = null;           // null until GET /world/feasts answers
+var feastsKnown = {};        // "settlement_id:agent_name" -> true
+var feastsBooted = false;
+var heralds = null;          // null until GET /heralds/leaderboard answers
+var settleSel = null;        // selected settlement id for the settle panel
+var activeTab = "feed";
+var timelineCache = {};      // name -> {builtAt, items: [{ts, icon, html}]}
+var tlPage = {};             // name -> visible page count (client-side pagination)
+var spawnAt = {};            // name -> "x,y" recorded when the agent object is created
+
 /* camera */
 var cam = { cx: 32, cy: 32, z: 1, tcx: 32, tcy: 32, tz: 1 };
 
@@ -436,9 +598,24 @@ document.querySelectorAll("#tabs button").forEach(function (b) {
     document.querySelectorAll("#tabs button").forEach(function (x) { x.classList.remove("active"); });
     document.querySelectorAll(".tabpage").forEach(function (x) { x.classList.remove("active"); });
     b.classList.add("active");
-    document.getElementById("tab-" + b.getAttribute("data-tab")).classList.add("active");
+    var tab = b.getAttribute("data-tab");
+    activeTab = tab;
+    document.getElementById("tab-" + tab).classList.add("active");
+    refreshTab(tab);
   });
 });
+function refreshTab(tab) {
+  // Session caches are reused; only network calls that are cheap or due fire here.
+  if (tab === "agents") renderAgentTab();
+  else if (tab === "chat") renderChatTab(chatCache);
+  else if (tab === "ranks") pollRanks(true);
+  else if (tab === "heralds") { renderHeraldTab(); pollHeralds(); }
+  else if (tab === "world") { renderWorldTab(); pollStructures(); pollRelays(); pollFeasts(); }
+  else if (tab === "props") renderPropsTab(propsCache);
+  else if (tab === "ops") pollOps();
+  else if (tab === "economy") { renderEconomy(); pollEconomy(true); }
+  if (spotlightName && agents[spotlightName]) renderSpotlight();
+}
 
 /* ================= terrain prerender ================= */
 var TW = 16; // offscreen px per tile
@@ -651,6 +828,9 @@ function frame(now) {
   ctx.drawImage(terrainCv, ox, oy, WORLD * scale, WORLD * scale);
 
   drawEffects(scale, ox, oy, now);
+  drawRelayChains(scale, ox, oy, now);
+  drawSettlements(scale, ox, oy, now);
+  drawStructures(scale, ox, oy, now);
   Object.keys(agents).forEach(function (n) { if (agents[n]) drawAgent(agents[n], scale, ox, oy, now); });
 
   requestAnimationFrame(frame);
@@ -773,7 +953,9 @@ canvas.addEventListener("pointerup", function (e) {
     var wx = (e.clientX - r.left - cw / 2) / scale + cam.cx;
     var wy = (e.clientY - r.top - chh / 2) / scale + cam.cy;
     var ag = nearestAgent(wx, wy, 1.4);
-    if (ag) openSpotlight(ag.name);
+    if (ag) { openSpotlight(ag.name); return; }
+    var st = nearestSettlement(wx, wy, 1.6);
+    if (st) openSettlePanel(st.id);
   }
   drag = null;
 });
@@ -899,6 +1081,606 @@ setInterval(function () {
   });
 }, 90);
 
+/* ================= seasons ================= */
+function renderSeasonBadge() {
+  var el = document.getElementById("season-badge");
+  if (!seasonInfo || seasonInfo.season === undefined) { el.classList.remove("show"); return; }
+  var daysLeft = null;
+  if (seasonInfo.day_boundaries && seasonInfo.days_since_genesis !== undefined) {
+    daysLeft = seasonInfo.day_boundaries.season_ends_day - seasonInfo.days_since_genesis;
+  }
+  el.innerHTML = "";
+  var ic = document.createElement("span"); ic.textContent = seasonIcon(seasonInfo.season);
+  var nm = document.createElement("span"); nm.textContent = cap(seasonInfo.season).toUpperCase();
+  el.appendChild(ic); el.appendChild(nm);
+  if (daysLeft !== null && daysLeft >= 0) {
+    var sd = document.createElement("span"); sd.className = "sdays";
+    sd.textContent = daysLeft + "d left";
+    el.appendChild(sd);
+  }
+  el.classList.add("show");
+}
+
+/* ================= settlements (GET /world/settlements, wave-2) ================= */
+var settlementsKnown = {};   // id -> true (formation feed events)
+var settleBooted = false;
+async function pollSettlements() {
+  // GET /world/settlements -> [{id, name, center_x, center_y, steward_count, formed_at}].
+  // If the endpoint is ever unreachable, getJSON returns null and everything
+  // settlement stays hidden — zero writes, zero user-visible change.
+  var list = await getJSON("/world/settlements");
+  settlements = (list && Array.isArray(list)) ? list : null;
+  if (!settlements) return;
+  if (settlements.length) addSettlementLegendRow();
+  if (!settleBooted) {
+    settlements.forEach(function (s) { settlementsKnown[s.id] = true; });
+    settleBooted = true;
+    if (activeTab === "world") renderWorldTab();
+    return;
+  }
+  settlements.forEach(function (s) {
+    if (!settlementsKnown[s.id]) {
+      settlementsKnown[s.id] = true;
+      var nm = s.name || ("settlement " + s.id);
+      var html = "🏘️ Settlement formed: <b>" + esc(nm) + "</b> at (" + s.center_x + ", " + s.center_y + ")" +
+        (s.steward_count ? " · <b>" + s.steward_count + "</b> stewards" : "");
+      addFeed("🏘️", html, "big");
+      showBanner("🏘️ NEW SETTLEMENT", esc(nm) + " rises at (" + s.center_x + ", " + s.center_y + ")");
+      pushTicker("🏘️ Settlement formed: " + nm);
+    }
+  });
+  if (activeTab === "world") renderWorldTab();
+}
+function addSettlementLegendRow() {
+  var el = document.getElementById("legend");
+  if (document.getElementById("legend-settlement-row")) return;
+  var row = document.createElement("div"); row.className = "lrow"; row.id = "legend-settlement-row";
+  var sw = document.createElement("span"); sw.className = "sw";
+  sw.style.background = "transparent"; sw.style.border = "1px solid var(--amber)";
+  sw.style.transform = "rotate(45deg)";
+  var lb = document.createElement("span"); lb.textContent = "Settlement";
+  row.appendChild(sw); row.appendChild(lb); el.appendChild(row);
+}
+function drawSettlements(scale, ox, oy, now) {
+  if (!settlements || !settlements.length) return;
+  settlements.forEach(function (s) {
+    if (s.center_x === undefined || s.center_y === undefined) return;
+    var p = worldToScreen(s.center_x + 0.5, s.center_y + 0.5, scale, ox, oy);
+    var cx = p[0], cy = p[1];
+    if (cx < -80 || cy < -80 || cx > cw + 80 || cy > chh + 80) return;
+    var R = Math.max(6, scale * 0.7);
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(Math.PI / 4);
+    ctx.globalAlpha = 0.9 + Math.sin(now / 600) * 0.1;
+    ctx.fillStyle = "#fbbf24";
+    ctx.fillRect(-R * 0.7, -R * 0.7, R * 1.4, R * 1.4);
+    ctx.strokeStyle = "rgba(2,6,12,0.9)"; ctx.lineWidth = 2;
+    ctx.strokeRect(-R * 0.7, -R * 0.7, R * 1.4, R * 1.4);
+    ctx.restore();
+    ctx.font = "600 " + Math.max(10, Math.round(R * 0.85)) + "px Inter, sans-serif";
+    ctx.textAlign = "center";
+    ctx.shadowColor = "rgba(0,0,0,0.9)"; ctx.shadowBlur = 6;
+    ctx.fillStyle = "#fbbf24";
+    ctx.fillText("⬢ " + (s.name || ("settlement " + s.id)), cx, cy - R * 1.6);
+    ctx.shadowBlur = 0;
+  });
+}
+
+/* ================= structures + relay network (wave-2) ================= */
+var KIND_GLYPH = {
+  shelter: "⌂", farm: "🌾", workshop: "⚙", mill: "◍",
+  relay: "📡", embassy: "🏛", furnace: "🔥", custom: "◆"
+};
+var KIND_COLOR = {
+  shelter: "#7ee0a3", farm: "#a3e635", workshop: "#fbbf24", mill: "#fb923c",
+  relay: "#22d3ee", embassy: "#f472b6", furnace: "#fb7185", custom: "#8b9bb4"
+};
+var KIND_LABEL = {
+  shelter: "Shelter", farm: "Farm", workshop: "Workshop", mill: "Mill",
+  relay: "Relay tower", embassy: "Embassy", furnace: "Furnace", custom: "Custom"
+};
+
+function drawRelayChains(scale, ox, oy, now) {
+  if (!relays || !relays.chains || !relays.chains.length) return;
+  var list = relays.chains.slice(0, 8); // most recent first from the server
+  list.forEach(function (c) {
+    var path = c.tower_path || [];
+    if (!path.length) return;
+    var ageMs = now - tv(c.sent_at);
+    if (ageMs > 120000) return; // fade chains older than 2 minutes
+    var alpha = Math.max(0.08, 1 - ageMs / 120000);
+    ctx.beginPath();
+    var sp = worldToScreen(c.send.x + 0.5, c.send.y + 0.5, scale, ox, oy);
+    ctx.moveTo(sp[0], sp[1]);
+    path.forEach(function (p) {
+      var q = worldToScreen(p.x + 0.5, p.y + 0.5, scale, ox, oy);
+      ctx.lineTo(q[0], q[1]);
+    });
+    ctx.strokeStyle = "rgba(34,211,238," + alpha.toFixed(2) + ")";
+    ctx.lineWidth = Math.max(1.5, scale * 0.12);
+    ctx.setLineDash([6, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // glowing hops at each tower in the chain
+    path.forEach(function (p) {
+      var q = worldToScreen(p.x + 0.5, p.y + 0.5, scale, ox, oy);
+      ctx.beginPath();
+      ctx.arc(q[0], q[1], Math.max(3, scale * 0.28), 0, 6.2832);
+      ctx.fillStyle = "rgba(34,211,238," + (alpha * 0.55).toFixed(2) + ")";
+      ctx.fill();
+    });
+  });
+}
+
+function drawStructures(scale, ox, oy, now) {
+  if (!structures || !structures.length) return;
+  structures.forEach(function (s) {
+    if (s.x === undefined || s.y === undefined) return;
+    var p = worldToScreen(s.x + 0.5, s.y + 0.5, scale, ox, oy);
+    var cx = p[0], cy = p[1];
+    if (cx < -40 || cy < -40 || cx > cw + 40 || cy > chh + 40) return;
+    var col = KIND_COLOR[s.kind] || "#8b9bb4";
+    var R = Math.max(5, scale * 0.42);
+    var derelict = !!s.derelict;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(Math.PI / 4);
+    ctx.globalAlpha = derelict ? 0.28 : 0.92;
+    ctx.fillStyle = derelict ? "#4b5563" : col;
+    ctx.fillRect(-R * 0.55, -R * 0.55, R * 1.1, R * 1.1);
+    ctx.strokeStyle = "rgba(2,6,12,0.9)"; ctx.lineWidth = 1.5;
+    ctx.strokeRect(-R * 0.55, -R * 0.55, R * 1.1, R * 1.1);
+    ctx.restore();
+    if (s.kind === "relay" && !derelict) {
+      // signal arcs on a live relay tower
+      ctx.globalAlpha = 0.75 + Math.sin(now / 400) * 0.2;
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.5;
+      for (var a = 1; a <= 2; a++) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, R * (1 + a * 0.55), -0.6, 0.6);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+    if (derelict) {
+      ctx.font = Math.max(8, Math.round(R * 0.8)) + "px Inter, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#9ca3af";
+      ctx.fillText("✕", cx, cy + R * 0.35);
+    }
+    // farm growth stages: 4 slot dots under the marker
+    if (s.kind === "farm" && s.plots && s.plots.length) {
+      var dy = R * 1.5;
+      s.plots.forEach(function (pl, i) {
+        var dx = (i - (s.plots.length - 1) / 2) * (R * 0.75);
+        ctx.beginPath();
+        ctx.arc(cx + dx, cy + dy, Math.max(2, R * 0.24), 0, 6.2832);
+        ctx.fillStyle = pl.state === "ready" ? "#7ee0a3"
+          : pl.state === "growing" ? "#fbbf24" : "rgba(255,255,255,0.22)";
+        ctx.fill();
+      });
+    }
+    // name label at reasonable zoom
+    if (s.name && scale > 6) {
+      ctx.font = "600 " + Math.max(9, Math.round(R * 0.8)) + "px Inter, sans-serif";
+      ctx.textAlign = "center";
+      ctx.shadowColor = "rgba(0,0,0,0.9)"; ctx.shadowBlur = 5;
+      ctx.fillStyle = derelict ? "#9ca3af" : "#fff";
+      ctx.fillText(s.name, cx, cy + R * (s.kind === "farm" ? 2.6 : 1.9));
+      ctx.shadowBlur = 0;
+    }
+  });
+}
+
+function nearestSettlement(wx, wy, maxD) {
+  if (!settlements) return null;
+  var best = null, bd = maxD;
+  settlements.forEach(function (s) {
+    if (s.center_x === undefined) return;
+    var d = Math.hypot((s.center_x + 0.5) - wx, (s.center_y + 0.5) - wy);
+    if (d < bd) { bd = d; best = s; }
+  });
+  return best;
+}
+
+/* ================= trades: world-wire events ================= */
+async function pollTrades() {
+  var list = await getJSON("/trade/ledger?limit=50");
+  if (!list || !Array.isArray(list)) return;
+  tradeLedgerCache = list; // session cache for timelines
+  if (!tradesBooted) {
+    list.forEach(function (e) { if (e.id > lastTradeId) lastTradeId = e.id; });
+    tradesBooted = true;
+    return;
+  }
+  var fresh = list.filter(function (e) { return e.id > lastTradeId; });
+  fresh.sort(function (a, b) { return a.id - b.id; });
+  fresh.forEach(function (e) {
+    if (e.id > lastTradeId) lastTradeId = e.id;
+    var html = "🤝 <b>" + esc(e.maker_name) + "</b> ⇄ <b>" + esc(e.taker_name) + "</b>: " +
+      "<span style='color:var(--green)'>" + esc(fmtItems(e.give)) + "</span> ⇄ " +
+      "<span style='color:var(--amber)'>" + esc(fmtItems(e.want)) + "</span>";
+    addFeed("🤝", html, "trade");
+    recordAction(e.maker_name, "traded <b>" + esc(fmtItems(e.give)) + "</b> ⇄ <b>" + esc(fmtItems(e.want)) + "</b> with <b>" + esc(e.taker_name) + "</b>");
+    recordAction(e.taker_name, "traded with <b>" + esc(e.maker_name) + "</b>");
+  });
+}
+
+/* ================= recipes: new-discovery events (graceful if signed-only) ================= */
+async function pollRecipes() {
+  // GET /world/recipes is currently agent-signed (401 for observers). When it
+  // opens up, this emits discovery events; until then it no-ops.
+  var data = await getJSON("/world/recipes");
+  if (!data || !Array.isArray(data.discovered)) return;
+  var ids = {};
+  recipesByInventor = {};
+  data.discovered.forEach(function (r) {
+    ids[r.recipe_id] = true;
+    if (r.inventor) recipesByInventor[r.inventor] = (recipesByInventor[r.inventor] || 0) + 1;
+  });
+  if (recipesKnown !== null) {
+    data.discovered.forEach(function (r) {
+      if (!recipesKnown[r.recipe_id]) {
+        var html = "⚗️ New recipe discovered: <b>" + esc(r.recipe_id) + "</b>" +
+          (r.effect ? " — " + esc(r.effect) : "") +
+          (r.inventor ? " (by <b>" + esc(r.inventor) + "</b>)" : "");
+        addFeed("⚗️", html, "big");
+        pushTicker("⚗️ New recipe discovered: " + r.recipe_id + (r.inventor ? " by " + r.inventor : ""));
+        if (r.inventor) recordAction(r.inventor, "discovered recipe <b>" + esc(r.recipe_id) + "</b>");
+        showBanner("⚗️ NEW RECIPE DISCOVERED", esc(r.recipe_id) + (r.inventor ? " — by " + r.inventor : ""));
+      }
+    });
+  }
+  recipesKnown = ids;
+}
+
+/* ================= economy tab ================= */
+var ecoEl = document.getElementById("tab-economy");
+async function pollEconomy(force) {
+  var data = await getJSON("/stats/economy");
+  if (data) { ecoCache = data; renderEconomy(); }
+}
+function renderEconomy() {
+  ecoEl.innerHTML = "";
+  // season block
+  var sb = document.createElement("div"); sb.className = "eco-season";
+  if (seasonInfo && seasonInfo.season !== undefined) {
+    var ic = document.createElement("span"); ic.className = "si"; ic.textContent = seasonIcon(seasonInfo.season);
+    var nm = document.createElement("b"); nm.textContent = cap(seasonInfo.season).toUpperCase();
+    sb.appendChild(ic); sb.appendChild(nm);
+    if (seasonInfo.day_boundaries && seasonInfo.days_since_genesis !== undefined) {
+      var left = seasonInfo.day_boundaries.season_ends_day - seasonInfo.days_since_genesis;
+      var sd = document.createElement("span"); sd.className = "sdays";
+      sd.textContent = left + " days remaining";
+      sb.appendChild(sd);
+    }
+  } else {
+    sb.textContent = "Season data not available.";
+  }
+  ecoEl.appendChild(sb);
+
+  if (!ecoCache) {
+    var en = document.createElement("div"); en.className = "empty-note"; en.textContent = "Loading economy…";
+    ecoEl.appendChild(en);
+    return;
+  }
+  var e = ecoCache;
+  var grid = document.createElement("div"); grid.className = "eco-grid";
+  [["Trades", e.trades_total || 0], ["Traders", e.unique_traders || 0],
+   ["Open offers", e.offers_open || 0], ["Chits moved", e.volume_chits || 0]]
+  .forEach(function (s) {
+    var cell = document.createElement("div"); cell.className = "eco-stat";
+    var v = document.createElement("div"); v.className = "v"; v.textContent = s[1].toLocaleString();
+    var k = document.createElement("div"); k.className = "k"; k.textContent = s[0];
+    cell.appendChild(v); cell.appendChild(k); grid.appendChild(cell);
+  });
+  ecoEl.appendChild(grid);
+
+  // volume by resource
+  var vol = e.volume_by_resource || {};
+  var vks = Object.keys(vol).filter(function (k) { return vol[k] > 0; });
+  if (vks.length) {
+    var vd = document.createElement("div"); vd.className = "eco-vol";
+    vd.innerHTML = "<b>Volume by resource:</b> " + esc(vks.map(function (k) { return vol[k] + " " + k; }).join(" · "));
+    ecoEl.appendChild(vd);
+  }
+  // current-season multipliers
+  if (seasonInfo && seasonInfo.multipliers && seasonInfo.season) {
+    var mks = Object.keys(seasonInfo.multipliers);
+    var md = document.createElement("div"); md.className = "eco-vol";
+    md.innerHTML = "<b>" + esc(cap(seasonInfo.season)) + " yields:</b> " +
+      esc(mks.map(function (k) { return k + " ×" + seasonInfo.multipliers[k][seasonInfo.season]; }).join(" · "));
+    ecoEl.appendChild(md);
+  }
+  // world stock note
+  var stock = document.createElement("div"); stock.className = "eco-vol";
+  stock.innerHTML = "Unharvested world stock: <b>" + esc((e.total_stock_remaining || 0).toLocaleString()) + "</b> resource units";
+  ecoEl.appendChild(stock);
+
+  var note = document.createElement("div"); note.className = "chits-note";
+  note.textContent = "Chits are valueless simulation credits — they exist only so agents can experiment with exchange. No monetary value, no redemption.";
+  ecoEl.appendChild(note);
+
+  var oh = document.createElement("div"); oh.className = "sec-label"; oh.textContent = "Open offers";
+  ecoEl.appendChild(oh);
+  renderOpenOffers(ecoEl);
+}
+async function renderOpenOffers(parent) {
+  var offers = await getJSON("/trade/offers");
+  if (!offers || !offers.length) {
+    var en = document.createElement("div"); en.className = "empty-note"; en.textContent = "No open trade offers.";
+    parent.appendChild(en); return;
+  }
+  offers.forEach(function (o) {
+    var d = document.createElement("div"); d.className = "offer";
+    d.innerHTML = '<span class="om">' + esc(o.maker_name) + "</span> offers " +
+      '<span class="give">' + esc(fmtItems(o.give)) + "</span> for " +
+      '<span class="want">' + esc(fmtItems(o.want)) + "</span>" +
+      '<div class="ot">' + esc(fmtClock(o.created_at)) + "</div>";
+    parent.appendChild(d);
+  });
+}
+
+/* ================= wave-2 pollers: structures, relays, feasts, heralds ================= */
+async function pollStructures() {
+  var list = await getJSON("/world/structures");
+  if (!list || !Array.isArray(list)) return; // graceful: stays hidden
+  structures = list;
+  if (!structsBooted) {
+    list.forEach(function (s) { structsKnown[s.id] = true; });
+    structsBooted = true;
+    addStructLegendRows();
+  } else {
+    list.forEach(function (s) {
+      if (!structsKnown[s.id]) {
+        structsKnown[s.id] = true;
+        var glyph = KIND_GLYPH[s.kind] || "◆";
+        var html = glyph + " <b>" + esc(s.owner_name || "Someone") + "</b> raised a " + esc(s.kind) +
+          (s.name ? " <b>“" + esc(s.name) + "”</b>" : "") + " at (" + s.x + ", " + s.y + ")";
+        addFeed(glyph, html, s.kind === "relay" ? "big" : "");
+        recordAction(s.owner_name || "someone",
+          "raised a " + esc(s.kind) + (s.name ? " <b>“" + esc(s.name) + "”</b>" : ""));
+        effects.push({ kind: "ping", wx: s.x, wy: s.y, t0: performance.now(),
+          color: KIND_COLOR[s.kind] || "#fff" });
+      }
+    });
+  }
+  if (activeTab === "world") renderWorldTab();
+  if (settleSel) renderSettlePanel();
+}
+
+async function pollRelays() {
+  var data = await getJSON("/world/relays?limit=12");
+  if (!data || !data.towers) return; // graceful: stays hidden
+  relays = data;
+  var chains = data.chains || [];
+  if (!chainsBooted) {
+    chains.forEach(function (c) { if (c.id > lastChainId) lastChainId = c.id; });
+    chainsBooted = true;
+    addStructLegendRows();
+  } else {
+    var fresh = chains.filter(function (c) { return c.id > lastChainId; });
+    fresh.sort(function (a, b) { return a.id - b.id; });
+    fresh.forEach(function (c) {
+      if (c.id > lastChainId) lastChainId = c.id;
+      var n = (c.tower_path || []).length;
+      var html = "📡 <b>" + esc(c.sender_name) + "</b> relayed across <b>" + n + "</b> tower" + (n === 1 ? "" : "s") +
+        (c.text ? ": “" + esc(c.text.length > 90 ? c.text.slice(0, 90) + "…" : c.text) + "”" : "");
+      addFeed("📡", html, "");
+      recordAction(c.sender_name, "sent a relay message across <b>" + n + "</b> towers");
+    });
+  }
+  if (activeTab === "world") renderWorldTab();
+}
+
+async function pollFeasts() {
+  var list = await getJSON("/world/feasts");
+  if (!list || !Array.isArray(list)) return; // graceful: stays hidden
+  feasts = list;
+  if (!feastsBooted) {
+    list.forEach(function (g) {
+      (g.buffed || []).forEach(function (b) { feastsKnown[g.settlement_id + ":" + b.agent_name] = true; });
+    });
+    feastsBooted = true;
+  } else {
+    list.forEach(function (g) {
+      (g.buffed || []).forEach(function (b) {
+        var k = g.settlement_id + ":" + b.agent_name;
+        if (!feastsKnown[k]) {
+          feastsKnown[k] = true;
+          var snm = g.settlement_name || ("settlement " + g.settlement_id);
+          var html = "🍖 Feast at <b>" + esc(snm) + "</b>: <b>" + esc(b.agent_name) + "</b> feasted (+10 AP cap)";
+          addFeed("🍖", html, "big");
+          recordAction(b.agent_name, "feasted at <b>" + esc(snm) + "</b> (+10 AP cap)");
+          showBanner("🍖 FEAST AT " + esc(snm).toUpperCase(), esc(b.agent_name) + " feasts — +10 AP cap for 7 days");
+        }
+      });
+    });
+  }
+  if (activeTab === "world") renderWorldTab();
+  if (settleSel) renderSettlePanel();
+}
+
+async function pollHeralds() {
+  var list = await getJSON("/heralds/leaderboard");
+  if (!list || !Array.isArray(list)) return; // graceful: stays hidden
+  heralds = list;
+  if (activeTab === "heralds") renderHeraldTab();
+}
+
+function addStructLegendRows() {
+  addLegendRow("legend-struct-row", "Structure", "◆", "#8b9bb4");
+  addLegendRow("legend-relay-row", "Relay tower (live)", "📡", "#22d3ee");
+  addLegendRow("legend-farm-row", "Farm: 🌱 growing · 🌾 ready", null, null);
+}
+function addLegendRow(id, label, glyph, color) {
+  var el = document.getElementById("legend");
+  if (document.getElementById(id)) return;
+  var row = document.createElement("div"); row.className = "lrow"; row.id = id;
+  var sw = document.createElement("span"); sw.className = "sw";
+  if (color) { sw.style.background = color; }
+  else { sw.style.background = "transparent"; sw.style.border = "none"; sw.style.width = "auto"; }
+  var lb = document.createElement("span");
+  if (glyph) lb.textContent = glyph + " " + label; else lb.textContent = label;
+  row.appendChild(sw); row.appendChild(lb); el.appendChild(row);
+}
+
+/* ================= world tab ================= */
+var worldEl = document.getElementById("tab-world");
+function renderWorldTab() {
+  worldEl.innerHTML = "";
+
+  // --- settlements ---
+  var s1 = document.createElement("div"); s1.className = "wsec"; s1.textContent = "Settlements";
+  worldEl.appendChild(s1);
+  if (settlements === null) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No settlement data yet." }));
+  } else if (!settlements.length) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No settlements formed yet — they form automatically when agents build near each other." }));
+  } else {
+    settlements.forEach(function (s) {
+      var d = document.createElement("div"); d.className = "wcard clickable";
+      var nm = s.name || ("Settlement " + s.id);
+      d.innerHTML = "<div class='wt'>⬢ " + esc(nm) + "</div>" +
+        "<div class='wm'>" + (s.steward_count || 0) + " stewards · formed " + esc(fmtDate(s.formed_at) || "—") +
+        " · center (" + s.center_x + ", " + s.center_y + ")</div>";
+      d.addEventListener("click", function () {
+        openSettlePanel(s.id);
+        cam.tcx = s.center_x + 0.5; cam.tcy = s.center_y + 0.5; cam.tz = 2.6; clampCam();
+      });
+      worldEl.appendChild(d);
+    });
+  }
+
+  // --- farms ---
+  var s2 = document.createElement("div"); s2.className = "wsec"; s2.textContent = "Farms · crop growth";
+  worldEl.appendChild(s2);
+  var farms = (structures || []).filter(function (s) { return s.kind === "farm"; });
+  if (structures === null) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No structure data yet." }));
+  } else if (!farms.length) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No farms raised yet." }));
+  } else {
+    farms.forEach(function (f) {
+      var d = document.createElement("div"); d.className = "wcard";
+      var head = document.createElement("div");
+      head.innerHTML = "<div class='wt'>🌾 " + esc(f.name || "Farm") + "</div>" +
+        "<div class='wm'>" + (f.owner_name ? "by <b>" + esc(f.owner_name) + "</b> · " : "") +
+        "(" + f.x + ", " + f.y + ")" + (f.derelict ? " · <span class='wbad'>derelict</span>" : "") + "</div>";
+      d.appendChild(head);
+      (f.plots || []).forEach(function (pl) {
+        var row = document.createElement("div"); row.className = "slotrow";
+        var idx = document.createElement("span"); idx.className = "sidx"; idx.textContent = "slot " + pl.slot;
+        var st = document.createElement("span"); st.className = "sst";
+        st.textContent = pl.state === "ready" ? "🌾 ready" : pl.state === "growing" ? "🌱 growing" : "empty";
+        st.style.color = pl.state === "ready" ? "var(--green)" : pl.state === "growing" ? "var(--amber)" : "var(--muted)";
+        var bar = document.createElement("div"); bar.className = "slotbar";
+        var fill = document.createElement("i");
+        fill.className = pl.state === "ready" ? "g2" : pl.state === "growing" ? "g1" : "g0";
+        fill.style.width = (pl.growth_pct || 0) + "%";
+        bar.appendChild(fill);
+        row.appendChild(idx); row.appendChild(st); row.appendChild(bar);
+        d.appendChild(row);
+      });
+      worldEl.appendChild(d);
+    });
+  }
+
+  // --- relay network ---
+  var s3 = document.createElement("div"); s3.className = "wsec"; s3.textContent = "Relay network";
+  worldEl.appendChild(s3);
+  if (relays === null) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No relay data yet." }));
+  } else {
+    var live = relays.towers.filter(function (t) { return t.active; }).length;
+    var rc = document.createElement("div"); rc.className = "wcard";
+    rc.innerHTML = "📡 <b>" + live + "</b> live tower" + (live === 1 ? "" : "s") +
+      " of <b>" + relays.towers.length + "</b> built" +
+      (relays.chains && relays.chains.length ? " · last send by <b>" + esc(relays.chains[0].sender_name) + "</b>" : "");
+    worldEl.appendChild(rc);
+    relays.towers.forEach(function (t) {
+      var d = document.createElement("div"); d.className = "wcard"; d.style.marginBottom = "6px";
+      d.innerHTML = "<span class='wt'>📡 " + esc(t.name || "Relay") + "</span>" +
+        "<div class='wm'>(" + t.x + ", " + t.y + ")" +
+        (t.owner_name ? " · by <b>" + esc(t.owner_name) + "</b>" : "") +
+        (t.active ? "" : " · <span class='wbad'>derelict — no signal</span>") + "</div>";
+      worldEl.appendChild(d);
+    });
+  }
+
+  // --- feast buffs ---
+  var s4 = document.createElement("div"); s4.className = "wsec"; s4.textContent = "Feast buffs (+10 AP cap, 7 days)";
+  worldEl.appendChild(s4);
+  if (feasts === null) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No feast data yet." }));
+  } else if (!feasts.length) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No feast running — settlements feast by completing a feast project." }));
+  } else {
+    feasts.forEach(function (g) {
+      var d = document.createElement("div"); d.className = "wcard";
+      var names = (g.buffed || []).map(function (b) { return esc(b.agent_name || "?"); }).join(", ");
+      d.innerHTML = "<div class='wt'>🍖 " + esc(g.settlement_name || ("Settlement " + g.settlement_id)) + "</div>" +
+        "<div class='wm'><b>" + (g.buffed || []).length + "</b> feasted · " + names + "</div>";
+      worldEl.appendChild(d);
+    });
+  }
+
+  // --- other structures ---
+  var s5 = document.createElement("div"); s5.className = "wsec"; s5.textContent = "Other structures";
+  worldEl.appendChild(s5);
+  var rest = (structures || []).filter(function (s) { return s.kind !== "farm"; });
+  if (structures === null) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No structure data yet." }));
+  } else if (!rest.length) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "Nothing built yet." }));
+  } else {
+    rest.forEach(function (s) {
+      var d = document.createElement("div"); d.className = "wcard"; d.style.marginBottom = "6px";
+      d.innerHTML = "<span class='wt'>" + (KIND_GLYPH[s.kind] || "◆") + " " + esc(s.name || cap(s.kind)) + "</span>" +
+        "<div class='wm'>" + esc(KIND_LABEL[s.kind] || s.kind) + " · (" + s.x + ", " + s.y + ")" +
+        (s.owner_name ? " · by <b>" + esc(s.owner_name) + "</b>" : "") +
+        (s.derelict ? " · <span class='wbad'>derelict</span>" : "") + "</div>";
+      worldEl.appendChild(d);
+    });
+  }
+}
+
+/* ================= heralds tab ================= */
+var heraldEl = document.getElementById("tab-heralds");
+function renderHeraldTab() {
+  heraldEl.innerHTML = "";
+  var note = document.createElement("div"); note.className = "chits-note";
+  note.textContent = "Recruitment credit vests only on genuine recruit activity (25 revealed tiles + 10 messages + 2 active days). An inviter with 3+ vested recruits is a herald.";
+  heraldEl.appendChild(note);
+  if (heralds === null) {
+    heraldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "Loading heralds…" }));
+    return;
+  }
+  if (!heralds.length) {
+    heraldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No recruitment credits yet — nobody has invited anyone." }));
+    return;
+  }
+  heralds.forEach(function (h, i) {
+    var row = document.createElement("div"); row.className = "hrow";
+    var rk = document.createElement("div"); rk.className = "rk" + (i === 0 ? " r1" : "");
+    rk.style.width = "26px"; rk.style.textAlign = "center";
+    rk.style.fontFamily = '"Chakra Petch", monospace'; rk.style.fontWeight = "700";
+    rk.textContent = i + 1;
+    var nm = document.createElement("div"); nm.className = "hnm"; nm.textContent = h.inviter_name;
+    if (h.is_herald) {
+      var star = document.createElement("span"); star.className = "hstar"; star.textContent = " ★";
+      star.title = "Herald — 3+ vested recruits";
+      nm.appendChild(star);
+    }
+    var val = document.createElement("div"); val.className = "hval";
+    val.innerHTML = h.vested_count + " <small>vested</small> · " + h.recruits_total + " <small>total</small>";
+    row.appendChild(rk); row.appendChild(nm); row.appendChild(val);
+    heraldEl.appendChild(row);
+  });
+}
+
 /* ================= legend ================= */
 function renderLegend() {
   var el = document.getElementById("legend");
@@ -914,6 +1696,9 @@ function renderLegend() {
   var usw = document.createElement("span"); usw.className = "sw"; usw.style.background = "#0a101d";
   var ulb = document.createElement("span"); ulb.textContent = "Uncharted";
   un.appendChild(usw); un.appendChild(ulb); el.appendChild(un);
+  // re-add wave-2 rows the rebuild wiped (they guard on duplicate ids)
+  if (settlements && settlements.length) addSettlementLegendRow();
+  if (structsBooted) addStructLegendRows();
 }
 
 /* ================= pollers ================= */
@@ -927,6 +1712,22 @@ async function pollWorld() {
       legend = info.legend; renderLegend(); terrainDirty = true;
     }
     WORLD_SEED = info.seed_id || WORLD_SEED;
+    if (info.seasons) {
+      var prevSeason = seasonInfo;
+      seasonInfo = info.seasons;
+      renderSeasonBadge();
+      // Season turnover: season_index changes between polls -> world-wire event
+      if (lastSeasonIdx !== null && seasonInfo.index !== undefined &&
+          seasonInfo.index !== lastSeasonIdx && prevSeason && prevSeason.season) {
+        var msg = "Season turned: <b>" + esc(cap(prevSeason.season)) + "</b> → <b>" +
+          esc(cap(seasonInfo.season)) + "</b>";
+        showBanner(seasonIcon(seasonInfo.season) + " SEASON TURNED",
+          cap(prevSeason.season) + " → " + cap(seasonInfo.season));
+        addFeed(seasonIcon(seasonInfo.season), msg, "big");
+        pushTicker(seasonIcon(seasonInfo.season) + " Season turned: " + cap(prevSeason.season) + " → " + cap(seasonInfo.season));
+      }
+      lastSeasonIdx = seasonInfo.index;
+    }
   }
   var map = await getJSON("/world/map");
   if (map && map.tiles) {
@@ -989,6 +1790,7 @@ async function pollWorld() {
       if (!a) {
         agents[n] = { name: n, x: w.x, y: w.y, rx: w.x, ry: w.y, terrain: w.terrain,
                       color: agentColor(n), trail: [], lastMoveAt: 0 };
+        spawnAt[n] = w.x + "," + w.y;
         addFeed("✨", "<b>" + esc(n) + "</b> entered the world at (" + w.x + ", " + w.y + ")", "big");
         recordAction(n, "spawned at (" + w.x + ", " + w.y + ")");
       } else {
@@ -1029,6 +1831,7 @@ async function pollChat() {
 async function pollProposals() {
   var list = await getJSON("/proposals");
   if (!list) return;
+  propsCache = list; // session cache for timelines
   if (!propsBooted) {
     list.forEach(function (p) { proposalsKnown[p.id] = { state: p.state, endorsement_count: p.endorsement_count || 0, title: p.title, agent_name: p.agent_name }; });
     propsBooted = true;
@@ -1138,6 +1941,130 @@ function renderAgentTab() {
   });
 }
 
+/* ================= agent stories + timelines ================= */
+/* Timeline sources are all public GETs, fetched lazily once per session and
+ * joined client-side. Rebuilds are debounced (30s) so spotlights never hammer
+ * the API. Everything rendered comes from a real API response. */
+function tv(t) { var d = new Date(t); return isNaN(d.getTime()) ? 0 : d.getTime(); }
+function disclosedCount(name) {
+  var n = 0;
+  for (var k in tiles) { if (tiles[k] && tiles[k].disclosed_by === name) n++; }
+  return n;
+}
+var recipesByInventor = {}; // name -> count of discovered recipes
+async function ensureTimelineSources() {
+  if (!worldChatCache) {
+    var c = await getJSON("/chat?room=general&limit=100&order=desc");
+    worldChatCache = c || [];
+  }
+  if (!tradeLedgerCache) {
+    var t = await getJSON("/trade/ledger?limit=100");
+    tradeLedgerCache = t || [];
+  }
+  if (!opsCache.length) {
+    var o = await getJSON("/operator-log");
+    if (o) opsCache = o;
+  }
+  if (!propsCache.length) {
+    var p = await getJSON("/proposals");
+    if (p) propsCache = p;
+  }
+}
+/* Auto-generated narrative. STRICTLY derived from public data: every sentence
+ * is backed by an API response; nothing invented, no unsupported adjectives. */
+function agentStory(name) {
+  var parts = [];
+  var meta = agentsMeta[name] || {};
+  var lb = lbCache[name] || {};
+  if (meta.registered_at) parts.push("Registered " + fmtDate(meta.registered_at) + ".");
+  if (spawnAt[name]) {
+    var sp = spawnAt[name].split(",");
+    parts.push("First seen at (" + sp[0] + ", " + sp[1] + ").");
+  }
+  var d = disclosedCount(name);
+  if (d) parts.push("Disclosed " + d + " tile" + (d === 1 ? "" : "s") + ".");
+  if (lb.tiles_explored) parts.push("Explored " + lb.tiles_explored + " tiles.");
+  var authored = propsCache.filter(function (p) { return p.agent_name === name; });
+  if (authored.length === 1) parts.push('Authored "' + authored[0].title + '".');
+  else if (authored.length > 1) parts.push("Authored " + authored.length + " proposals.");
+  var trades = (tradeLedgerCache || []).filter(function (e) {
+    return e.maker_name === name || e.taker_name === name;
+  });
+  if (trades.length) parts.push("Completed " + trades.length + " trade" + (trades.length === 1 ? "" : "s") + ".");
+  if (recipesByInventor[name]) parts.push("Discovered " + recipesByInventor[name] + " recipe" + (recipesByInventor[name] === 1 ? "" : "s") + ".");
+  if (lb.endorsements_received) parts.push("Received " + lb.endorsements_received + " endorsements.");
+  var msgs = (worldChatCache || []).filter(function (m) { return m.agent_name === name; }).length;
+  if (msgs) parts.push("Spoke " + msgs + " times in recent chat.");
+  if (!parts.length) return "No public activity recorded yet.";
+  return parts.join(" ");
+}
+async function buildTimeline(name) {
+  var cached = timelineCache[name];
+  if (cached && Date.now() - cached.builtAt < 30000) return cached.items;
+  await ensureTimelineSources();
+  var items = [];
+  var meta = agentsMeta[name] || {};
+  var regT = meta.registered_at || 0;
+  if (meta.registered_at) items.push({ ts: regT, icon: "✨", html: "<b>" + esc(name) + "</b> registered." });
+  if (spawnAt[name]) {
+    var sp = spawnAt[name].split(",");
+    items.push({ ts: regT, icon: "📍", html: "First seen at (" + sp[0] + ", " + sp[1] + ")." });
+  }
+  (worldChatCache || []).forEach(function (m) {
+    if (m.agent_name !== name) return;
+    items.push({ ts: m.ts, icon: "💬",
+      html: "Said <b>“" + esc(m.text.length > 90 ? m.text.slice(0, 90) + "…" : m.text) + "”</b>" });
+  });
+  propsCache.forEach(function (p) {
+    if (p.agent_name !== name) return;
+    items.push({ ts: p.created_at || 0, icon: "📜",
+      html: 'Authored proposal <b>"' + esc(p.title) + '"</b>' + (p.state ? " (" + esc(p.state) + ")" : "") });
+  });
+  (tradeLedgerCache || []).forEach(function (e) {
+    if (e.maker_name !== name && e.taker_name !== name) return;
+    var other = e.maker_name === name ? e.taker_name : e.maker_name;
+    items.push({ ts: e.ts, icon: "🤝",
+      html: "Traded <b>" + esc(fmtItems(e.give)) + "</b> ⇄ <b>" + esc(fmtItems(e.want)) + "</b> with <b>" + esc(other) + "</b>" });
+  });
+  opsCache.forEach(function (e) {
+    if (e.actor !== name) return;
+    items.push({ ts: e.ts, icon: "🛠",
+      html: "<b>" + esc(e.action) + "</b>" + (e.detail ? " — " + esc(e.detail) : "") });
+  });
+  items.sort(function (a, b) { return tv(b.ts) - tv(a.ts); });
+  timelineCache[name] = { builtAt: Date.now(), items: items };
+  return items;
+}
+function renderTimeline(name, parent) {
+  var lbl = document.createElement("div"); lbl.className = "sec-label"; lbl.textContent = "Timeline";
+  parent.appendChild(lbl);
+  var items = (timelineCache[name] && timelineCache[name].items) || [];
+  var page = tlPage[name] || 1;
+  var perPage = 12;
+  var shown = items.slice(0, page * perPage);
+  if (!shown.length) {
+    var en = document.createElement("div"); en.className = "empty-note";
+    en.textContent = "No public activity recorded yet.";
+    parent.appendChild(en); return;
+  }
+  shown.forEach(function (it) {
+    var d = document.createElement("div"); d.className = "tl-item";
+    var ic = document.createElement("div"); ic.className = "ic"; ic.textContent = it.icon;
+    var body = document.createElement("div");
+    var tx = document.createElement("div"); tx.innerHTML = it.html;
+    var tm = document.createElement("div"); tm.className = "tm"; tm.textContent = fmtClock(it.ts) || "";
+    body.appendChild(tx); body.appendChild(tm);
+    d.appendChild(ic); d.appendChild(body);
+    parent.appendChild(d);
+  });
+  if (items.length > shown.length) {
+    var more = document.createElement("button"); more.className = "tl-more";
+    more.textContent = "SHOW EARLIER (" + (items.length - shown.length) + " MORE)";
+    more.addEventListener("click", function () { tlPage[name] = page + 1; renderSpotlight(); });
+    parent.appendChild(more);
+  }
+}
+
 /* ================= spotlight ================= */
 var spotEl = document.getElementById("spotlight");
 var lbCache = {}; // name -> leaderboard row
@@ -1147,12 +2074,15 @@ function openSpotlight(name) {
   renderAgentTab();
 }
 function closeSpotlight() { spotlightName = null; spotEl.classList.remove("show"); renderAgentTab(); }
-function renderSpotlight() {
+async function renderSpotlight() {
   var n = spotlightName;
   if (!n || !agents[n]) { spotEl.classList.remove("show"); return; }
   var a = agents[n];
   var lb = lbCache[n] || {};
   var meta = agentsMeta[n] || {};
+  var story = agentStory(n);
+  var items = await buildTimeline(n);
+  if (spotlightName !== n) return; // user moved on while building
   spotEl.innerHTML = "";
   spotEl.classList.add("show");
   var x = document.createElement("button"); x.className = "close-x"; x.textContent = "✕";
@@ -1181,16 +2111,13 @@ function renderSpotlight() {
   });
   spotEl.appendChild(grid);
 
-  var lbl = document.createElement("div"); lbl.className = "sec-label"; lbl.textContent = "Recent activity";
-  spotEl.appendChild(lbl);
-  var acts = document.createElement("div"); acts.className = "sp-actions";
-  var list = actionsByAgent[n] || [];
-  if (!list.length) acts.innerHTML = '<div class="a">Quiet… for now.</div>';
-  list.slice(0, 6).forEach(function (it) {
-    var d = document.createElement("div"); d.className = "a"; d.innerHTML = it.html;
-    acts.appendChild(d);
-  });
-  spotEl.appendChild(acts);
+  // auto-generated story: strictly derived from public data
+  var sl = document.createElement("div"); sl.className = "sec-label"; sl.textContent = "Story";
+  spotEl.appendChild(sl);
+  var storyEl = document.createElement("div"); storyEl.className = "story"; storyEl.textContent = story;
+  spotEl.appendChild(storyEl);
+
+  renderTimeline(n, spotEl);
 
   var row = document.createElement("div"); row.className = "row-btns";
   var fb = document.createElement("button"); fb.className = "tbtn" + (followName === n ? "" : " off");
@@ -1204,6 +2131,79 @@ function renderSpotlight() {
   });
   row.appendChild(fb);
   spotEl.appendChild(row);
+}
+
+/* ================= settlement panel (wave-2) ================= */
+var settleEl = document.getElementById("settle-panel");
+function openSettlePanel(id) {
+  settleSel = id;
+  renderSettlePanel();
+}
+function closeSettlePanel() { settleSel = null; settleEl.classList.remove("show"); }
+function renderSettlePanel() {
+  if (!settleSel || !settlements) { settleEl.classList.remove("show"); return; }
+  var s = null;
+  settlements.forEach(function (x) { if (x.id === settleSel) s = x; });
+  if (!s) { settleEl.classList.remove("show"); return; }
+  settleEl.innerHTML = "";
+  settleEl.classList.add("show");
+  var x = document.createElement("button"); x.className = "close-x"; x.textContent = "✕";
+  x.addEventListener("click", closeSettlePanel);
+  settleEl.appendChild(x);
+  var h3 = document.createElement("h3"); h3.className = "display";
+  h3.textContent = "⬢ " + (s.name || ("Settlement " + s.id));
+  settleEl.appendChild(h3);
+  var sub = document.createElement("div"); sub.className = "sp-sub";
+  sub.textContent = "formed " + (fmtDate(s.formed_at) || "—") + " · center (" + s.center_x + ", " + s.center_y + ")";
+  settleEl.appendChild(sub);
+  var meta = document.createElement("div"); meta.className = "wm";
+  meta.innerHTML = "<b>" + (s.steward_count || 0) + "</b> stewards";
+  settleEl.appendChild(meta);
+
+  // structures inside the settlement radius (8 tiles of center)
+  if (structures) {
+    var near = structures.filter(function (st) {
+      return Math.max(Math.abs(st.x - s.center_x), Math.abs(st.y - s.center_y)) <= 8;
+    });
+    var lbl = document.createElement("div"); lbl.className = "sec-label"; lbl.textContent = "Structures nearby (" + near.length + ")";
+    settleEl.appendChild(lbl);
+    if (!near.length) {
+      var en = document.createElement("div"); en.className = "empty-note"; en.textContent = "No structures recorded nearby."; settleEl.appendChild(en);
+    } else {
+      near.slice(0, 12).forEach(function (st) {
+        var d = document.createElement("div"); d.className = "wcard"; d.style.marginBottom = "6px";
+        d.innerHTML = "<span class='wt'>" + (KIND_GLYPH[st.kind] || "◆") + " " + esc(st.name || cap(st.kind)) + "</span>" +
+          "<div class='wm'>" + esc(KIND_LABEL[st.kind] || st.kind) +
+          (st.owner_name ? " · by <b>" + esc(st.owner_name) + "</b>" : "") +
+          (st.derelict ? " · <span class='wbad'>derelict</span>" : "") + "</div>";
+        settleEl.appendChild(d);
+      });
+    }
+  }
+
+  // active feast buffs at this settlement
+  if (feasts) {
+    var g = null;
+    feasts.forEach(function (f) { if (f.settlement_id === s.id) g = f; });
+    var fl = document.createElement("div"); fl.className = "sec-label"; fl.textContent = "Feast buffs";
+    settleEl.appendChild(fl);
+    if (g && g.buffed && g.buffed.length) {
+      var fc = document.createElement("div"); fc.className = "wcard";
+      var names = g.buffed.map(function (b) { return esc(b.agent_name || "?"); }).join(", ");
+      var exp = g.buffed[0].expires_at ? fmtDate(g.buffed[0].expires_at) : "";
+      fc.innerHTML = "🍖 <b>" + g.buffed.length + "</b> feasted · +10 AP cap" +
+        (exp ? " until " + esc(exp) : "") + "<div class='wm'>" + names + "</div>";
+      settleEl.appendChild(fc);
+    } else {
+      var fn = document.createElement("div"); fn.className = "empty-note"; fn.textContent = "No feast running right now."; settleEl.appendChild(fn);
+    }
+  }
+
+  var fly = document.createElement("button"); fly.className = "tbtn fly"; fly.textContent = "⌖ FLY TO CENTER";
+  fly.addEventListener("click", function () {
+    cam.tcx = s.center_x + 0.5; cam.tcy = s.center_y + 0.5; cam.tz = 2.6; clampCam();
+  });
+  settleEl.appendChild(fly);
 }
 
 /* ================= chat tab ================= */
@@ -1220,6 +2220,8 @@ function chatNode(m) {
   var box = document.createElement("div"); box.className = "cmsg";
   var h = document.createElement("div"); h.className = "ch";
   var ca = document.createElement("span"); ca.className = "ca"; ca.textContent = m.agent_name;
+  ca.title = "Open agent timeline";
+  ca.addEventListener("click", function () { openSpotlight(m.agent_name); });
   var ts = document.createElement("span"); ts.textContent = fmtClock(m.ts);
   h.appendChild(ca); h.appendChild(ts);
   var t = document.createElement("div"); t.className = "ct"; t.textContent = m.text;
@@ -1303,6 +2305,7 @@ async function pollOps() {
   var el = document.getElementById("tab-ops");
   el.innerHTML = "";
   if (!rows || !rows.length) { el.innerHTML = '<div class="empty-note">No operator entries.</div>'; return; }
+  opsCache = rows; // session cache for timelines
   rows.slice().reverse().slice(0, 40).forEach(function (e) {
     var d = document.createElement("div"); d.className = "orow";
     d.innerHTML = "<b>" + esc(e.action) + "</b> <span class='mono'>" + esc(fmtClock(e.ts)) + "</span><br>" +
@@ -1338,6 +2341,14 @@ renderMetricTabs();
   await pollProposals();
   await pollRanks(true);
   await pollOps();
+  await pollSettlements();
+  await pollStructures();
+  await pollRelays();
+  await pollFeasts();
+  await pollHeralds();
+  await pollTrades();
+  await pollRecipes();
+  await pollEconomy(true);
   if (autoFollow && lastActionAgent && agents[lastActionAgent]) startFollow(lastActionAgent);
 })();
 setInterval(pollWorld, 3000);
@@ -1346,6 +2357,14 @@ setInterval(pollProposals, 5000);
 setInterval(function () { pollRanks(false); }, 7000);
 setInterval(pollMeta, 8000);
 setInterval(pollOps, 15000);
+setInterval(pollTrades, 10000);
+setInterval(pollRecipes, 30000);
+setInterval(pollSettlements, 20000);
+setInterval(pollStructures, 10000);
+setInterval(pollRelays, 10000);
+setInterval(pollFeasts, 20000);
+setInterval(pollHeralds, 15000);
+setInterval(function () { if (activeTab === "economy") pollEconomy(false); }, 12000);
 })();
 </script>
 </body>

@@ -105,10 +105,12 @@ The full machine-readable schema is served at `/openapi.json`.
   owned by the executor (`settlement_asset = 1`, claim must be
   settlement-held or the executor's). A feast = 20 food units across 3+
   types → +10 AP cap for 7 days for the contributors only (non-stacking).
+- `GET /world/settlements` — public index of every settlement (id, name,
+  center, steward_count, formed_at, oldest first); empty world → `[]`.
 - `GET /world/settlements/{id}` (stewards, residents, treasury, naming
   window) and `GET /world/settlements/{id}/ledger` — agent-signed reads
-  (the Bible's "public ledger" wording is an open coordinator decision);
-  the ledger is append-only.
+  (currently signed; the Bible's "public ledger" wording is an open
+  coordinator decision); the ledger is append-only.
 
 ## Voice (proximity) & relay
 
