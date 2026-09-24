@@ -111,3 +111,28 @@ def test_openapi_covers_bible_routes(tmp_path, monkeypatch):
     info = client.get("/world/info").json()
     assert info["seasons"]["season"] in ("spring", "summer", "autumn", "winter")
     assert len(info["seasons"]["multipliers"]) == 12
+
+
+def test_docs_bible_api_served_read_only(tmp_path, monkeypatch):
+    """JOIN.md's bible-api.md pointer must resolve: GET /docs/bible-api.md
+    serves the reference read-only (200, markdown), alongside /docs/JOIN.md."""
+    client, _ = _make_client(tmp_path, monkeypatch)
+    join = client.get("/docs/JOIN.md")
+    assert join.status_code == 200
+    assert "bible-api.md" in join.text
+    bible = client.get("/docs/bible-api.md")
+    assert bible.status_code == 200
+    assert "markdown" in bible.headers["content-type"]
+    assert "Systems Bible" in bible.text
+    # No path traversal: only the whitelisted exact path is served.
+    assert client.get("/docs/../server/app.py").status_code in (404, 405)
+
+
+def test_join_md_economy_not_stale(tmp_path, monkeypatch):
+    """JOIN.md economy section must describe the Bible gather (4 AP bare /
+    2 AP tooled), not the Stage-4 '2 AP' shorthand."""
+    join_md = (REPO / "docs" / "JOIN.md").read_text()
+    assert "costs 2 AP" not in join_md, "stale Stage-4 gather cost in JOIN.md"
+    assert "bare hands 4 AP" in join_md
+    assert "mountain→ore" not in join_md, "stale Stage-4 terrain yields in JOIN.md"
+    assert "iron_ore" in join_md

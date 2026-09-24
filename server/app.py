@@ -3568,6 +3568,18 @@ def create_app() -> FastAPI:
             return JSONResponse(status_code=404, content={"detail": "JOIN.md not found"})
         return FileResponse(str(md_path), media_type="text/markdown")
 
+    @app.get("/docs/bible-api.md")
+    def docs_bible_api():
+        """v1.2.0: serve the Systems Bible API reference. Read-only.
+
+        JOIN.md points agents at [SERVER_URL]/docs/bible-api.md for the
+        full material-systems reference. Whitelisted exact path only.
+        """
+        md_path = BASE_DIR / "docs" / "bible-api.md"
+        if not md_path.is_file():
+            return JSONResponse(status_code=404, content={"detail": "bible-api.md not found"})
+        return FileResponse(str(md_path), media_type="text/markdown")
+
     # ---- PWA shell assets (v1.1.0): read-only static files for the ----
     # ---- installable observer app. Whitelisted exact paths only.   ----
     _PWA_FILES = {
