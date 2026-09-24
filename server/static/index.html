@@ -359,6 +359,51 @@
   /* feed trade items */
   .feed-item.k-trade { border-color: rgba(126,224,163,.35); background: rgba(126,224,163,.05); }
 
+  /* ---------- wave-2: heralds + world tab + settlement panel ---------- */
+  .hrow {
+    display: flex; align-items: center; gap: 10px; padding: 9px 10px; margin-bottom: 6px;
+    background: rgba(255,255,255,.025); border: 1px solid rgba(255,255,255,.05); border-radius: 9px;
+  }
+  .hrow .hnm { font-weight: 600; font-size: 13px; flex: 1; }
+  .hrow .hstar { color: #ffd700; font-size: 15px; }
+  .hrow .hval { font-family: "Chakra Petch", monospace; font-size: 13px; color: var(--green); }
+  .hrow .hval small { color: var(--muted); font-size: 10.5px; }
+  .wsec { font-size: 10.5px; letter-spacing: 2px; color: var(--muted); text-transform: uppercase; margin: 14px 0 8px 2px; font-weight: 600; }
+  .wcard {
+    padding: 10px 12px; background: rgba(255,255,255,.025);
+    border: 1px solid rgba(255,255,255,.06); border-radius: 10px; margin-bottom: 8px;
+    font-size: 12.5px; line-height: 1.5;
+  }
+  .wcard.clickable { cursor: pointer; transition: all .15s; }
+  .wcard.clickable:hover { border-color: rgba(251,191,36,.45); transform: translateX(2px); }
+  .wcard .wt { font-weight: 700; font-size: 13.5px; }
+  .wcard .wm { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+  .wcard .wm b { color: var(--text); }
+  .wcard .wbad { color: var(--red); font-weight: 600; }
+  .slotbar { height: 7px; background: rgba(255,255,255,.07); border-radius: 4px; margin: 4px 0 7px; overflow: hidden; }
+  .slotbar i { display: block; height: 100%; border-radius: 4px; transition: width .6s ease; }
+  .slotbar .g0 { background: rgba(255,255,255,.15); }
+  .slotbar .g1 { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
+  .slotbar .g2 { background: linear-gradient(90deg, #7ee0a3, #22d3ee); }
+  .slotrow { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); }
+  .slotrow .sidx { font-family: "Chakra Petch", monospace; width: 42px; flex: none; color: var(--cyan); }
+  .slotrow .sst { width: 74px; flex: none; font-weight: 600; }
+  .slotrow .slotbar { flex: 1; margin: 2px 0; }
+  #settle-panel {
+    position: absolute; top: 64px; right: 14px; width: 302px; z-index: 15;
+    background: var(--panel); border: 1px solid rgba(251,191,36,.35);
+    border-radius: 14px; padding: 16px; display: none;
+    box-shadow: 0 12px 40px rgba(0,0,0,.6);
+    animation: banner-in .3s ease;
+    max-height: calc(100% - 160px); overflow-y: auto;
+  }
+  #settle-panel.show { display: block; }
+  #settle-panel h3 { margin: 0; font-size: 17px; color: var(--amber); }
+  #settle-panel .sp-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  #settle-panel .close-x { position: absolute; top: 10px; right: 12px; background: none; border: none; color: var(--muted); font-size: 16px; cursor: pointer; }
+  #settle-panel .close-x:hover { color: #fff; }
+  #settle-panel .fly { margin-top: 10px; width: 100%; }
+
   @media (max-width: 920px) {
     #main { flex-direction: column; }
     #stage { min-height: 46vh; }
@@ -398,6 +443,7 @@
     <div id="season-badge"></div>
     <div id="follow-chip"><span id="follow-label"></span><button id="follow-x" title="stop following">✕</button></div>
     <div id="spotlight"></div>
+    <div id="settle-panel"></div>
     <div id="legend"></div>
     <div id="hud-coords">—</div>
   </div>
@@ -407,6 +453,8 @@
       <button data-tab="feed" class="active">FEED</button>
       <button data-tab="agents">AGENTS</button>
       <button data-tab="ranks">RANKS</button>
+      <button data-tab="heralds">HERALDS</button>
+      <button data-tab="world">WORLD</button>
       <button data-tab="chat">CHAT</button>
       <button data-tab="props">VOTES</button>
       <button data-tab="ops">OPS</button>
@@ -418,6 +466,8 @@
       <div id="rank-metric"></div>
       <div id="rank-rows"></div>
     </div>
+    <div class="tabpage" id="tab-heralds"></div>
+    <div class="tabpage" id="tab-world"></div>
     <div class="tabpage" id="tab-chat"></div>
     <div class="tabpage" id="tab-props"></div>
     <div class="tabpage" id="tab-ops"></div>
@@ -507,6 +557,18 @@ var lastTradeId = 0, tradesBooted = false;
 var worldChatCache = null;   // session cache of /chat?order=desc (for timelines)
 var recipesKnown = null;     // set of discovered recipe_ids (graceful: endpoint is signed-only)
 var ecoCache = null;         // last /stats/economy
+
+/* ---- wave-2 observer state: structures, relays, feasts, heralds ---- */
+var structures = null;       // null until GET /world/structures answers
+var structsKnown = {};       // id -> true (new-structure feed events)
+var structsBooted = false;
+var relays = null;           // {towers, chains} or null
+var lastChainId = 0, chainsBooted = false;
+var feasts = null;           // null until GET /world/feasts answers
+var feastsKnown = {};        // "settlement_id:agent_name" -> true
+var feastsBooted = false;
+var heralds = null;          // null until GET /heralds/leaderboard answers
+var settleSel = null;        // selected settlement id for the settle panel
 var activeTab = "feed";
 var timelineCache = {};      // name -> {builtAt, items: [{ts, icon, html}]}
 var tlPage = {};             // name -> visible page count (client-side pagination)
@@ -547,6 +609,8 @@ function refreshTab(tab) {
   if (tab === "agents") renderAgentTab();
   else if (tab === "chat") renderChatTab(chatCache);
   else if (tab === "ranks") pollRanks(true);
+  else if (tab === "heralds") { renderHeraldTab(); pollHeralds(); }
+  else if (tab === "world") { renderWorldTab(); pollStructures(); pollRelays(); pollFeasts(); }
   else if (tab === "props") renderPropsTab(propsCache);
   else if (tab === "ops") pollOps();
   else if (tab === "economy") { renderEconomy(); pollEconomy(true); }
@@ -764,7 +828,9 @@ function frame(now) {
   ctx.drawImage(terrainCv, ox, oy, WORLD * scale, WORLD * scale);
 
   drawEffects(scale, ox, oy, now);
+  drawRelayChains(scale, ox, oy, now);
   drawSettlements(scale, ox, oy, now);
+  drawStructures(scale, ox, oy, now);
   Object.keys(agents).forEach(function (n) { if (agents[n]) drawAgent(agents[n], scale, ox, oy, now); });
 
   requestAnimationFrame(frame);
@@ -887,7 +953,9 @@ canvas.addEventListener("pointerup", function (e) {
     var wx = (e.clientX - r.left - cw / 2) / scale + cam.cx;
     var wy = (e.clientY - r.top - chh / 2) / scale + cam.cy;
     var ag = nearestAgent(wx, wy, 1.4);
-    if (ag) openSpotlight(ag.name);
+    if (ag) { openSpotlight(ag.name); return; }
+    var st = nearestSettlement(wx, wy, 1.6);
+    if (st) openSettlePanel(st.id);
   }
   drag = null;
 });
@@ -1033,14 +1101,35 @@ function renderSeasonBadge() {
   el.classList.add("show");
 }
 
-/* ================= settlements (graceful until GET /world/settlements exists) ================= */
+/* ================= settlements (GET /world/settlements, wave-2) ================= */
+var settlementsKnown = {};   // id -> true (formation feed events)
+var settleBooted = false;
 async function pollSettlements() {
-  // Spec pending: GET /world/settlements -> [{id, name, center_x, center_y, steward_count, formed_at}].
-  // Until it exists the endpoint 404s, getJSON returns null, and everything settlement
-  // stays hidden. Zero writes, zero user-visible change.
+  // GET /world/settlements -> [{id, name, center_x, center_y, steward_count, formed_at}].
+  // If the endpoint is ever unreachable, getJSON returns null and everything
+  // settlement stays hidden — zero writes, zero user-visible change.
   var list = await getJSON("/world/settlements");
   settlements = (list && Array.isArray(list)) ? list : null;
-  if (settlements && settlements.length) addSettlementLegendRow();
+  if (!settlements) return;
+  if (settlements.length) addSettlementLegendRow();
+  if (!settleBooted) {
+    settlements.forEach(function (s) { settlementsKnown[s.id] = true; });
+    settleBooted = true;
+    if (activeTab === "world") renderWorldTab();
+    return;
+  }
+  settlements.forEach(function (s) {
+    if (!settlementsKnown[s.id]) {
+      settlementsKnown[s.id] = true;
+      var nm = s.name || ("settlement " + s.id);
+      var html = "🏘️ Settlement formed: <b>" + esc(nm) + "</b> at (" + s.center_x + ", " + s.center_y + ")" +
+        (s.steward_count ? " · <b>" + s.steward_count + "</b> stewards" : "");
+      addFeed("🏘️", html, "big");
+      showBanner("🏘️ NEW SETTLEMENT", esc(nm) + " rises at (" + s.center_x + ", " + s.center_y + ")");
+      pushTicker("🏘️ Settlement formed: " + nm);
+    }
+  });
+  if (activeTab === "world") renderWorldTab();
 }
 function addSettlementLegendRow() {
   var el = document.getElementById("legend");
@@ -1076,6 +1165,124 @@ function drawSettlements(scale, ox, oy, now) {
     ctx.fillText("⬢ " + (s.name || ("settlement " + s.id)), cx, cy - R * 1.6);
     ctx.shadowBlur = 0;
   });
+}
+
+/* ================= structures + relay network (wave-2) ================= */
+var KIND_GLYPH = {
+  shelter: "⌂", farm: "🌾", workshop: "⚙", mill: "◍",
+  relay: "📡", embassy: "🏛", furnace: "🔥", custom: "◆"
+};
+var KIND_COLOR = {
+  shelter: "#7ee0a3", farm: "#a3e635", workshop: "#fbbf24", mill: "#fb923c",
+  relay: "#22d3ee", embassy: "#f472b6", furnace: "#fb7185", custom: "#8b9bb4"
+};
+var KIND_LABEL = {
+  shelter: "Shelter", farm: "Farm", workshop: "Workshop", mill: "Mill",
+  relay: "Relay tower", embassy: "Embassy", furnace: "Furnace", custom: "Custom"
+};
+
+function drawRelayChains(scale, ox, oy, now) {
+  if (!relays || !relays.chains || !relays.chains.length) return;
+  var list = relays.chains.slice(0, 8); // most recent first from the server
+  list.forEach(function (c) {
+    var path = c.tower_path || [];
+    if (!path.length) return;
+    var ageMs = now - tv(c.sent_at);
+    if (ageMs > 120000) return; // fade chains older than 2 minutes
+    var alpha = Math.max(0.08, 1 - ageMs / 120000);
+    ctx.beginPath();
+    var sp = worldToScreen(c.send.x + 0.5, c.send.y + 0.5, scale, ox, oy);
+    ctx.moveTo(sp[0], sp[1]);
+    path.forEach(function (p) {
+      var q = worldToScreen(p.x + 0.5, p.y + 0.5, scale, ox, oy);
+      ctx.lineTo(q[0], q[1]);
+    });
+    ctx.strokeStyle = "rgba(34,211,238," + alpha.toFixed(2) + ")";
+    ctx.lineWidth = Math.max(1.5, scale * 0.12);
+    ctx.setLineDash([6, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // glowing hops at each tower in the chain
+    path.forEach(function (p) {
+      var q = worldToScreen(p.x + 0.5, p.y + 0.5, scale, ox, oy);
+      ctx.beginPath();
+      ctx.arc(q[0], q[1], Math.max(3, scale * 0.28), 0, 6.2832);
+      ctx.fillStyle = "rgba(34,211,238," + (alpha * 0.55).toFixed(2) + ")";
+      ctx.fill();
+    });
+  });
+}
+
+function drawStructures(scale, ox, oy, now) {
+  if (!structures || !structures.length) return;
+  structures.forEach(function (s) {
+    if (s.x === undefined || s.y === undefined) return;
+    var p = worldToScreen(s.x + 0.5, s.y + 0.5, scale, ox, oy);
+    var cx = p[0], cy = p[1];
+    if (cx < -40 || cy < -40 || cx > cw + 40 || cy > chh + 40) return;
+    var col = KIND_COLOR[s.kind] || "#8b9bb4";
+    var R = Math.max(5, scale * 0.42);
+    var derelict = !!s.derelict;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(Math.PI / 4);
+    ctx.globalAlpha = derelict ? 0.28 : 0.92;
+    ctx.fillStyle = derelict ? "#4b5563" : col;
+    ctx.fillRect(-R * 0.55, -R * 0.55, R * 1.1, R * 1.1);
+    ctx.strokeStyle = "rgba(2,6,12,0.9)"; ctx.lineWidth = 1.5;
+    ctx.strokeRect(-R * 0.55, -R * 0.55, R * 1.1, R * 1.1);
+    ctx.restore();
+    if (s.kind === "relay" && !derelict) {
+      // signal arcs on a live relay tower
+      ctx.globalAlpha = 0.75 + Math.sin(now / 400) * 0.2;
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.5;
+      for (var a = 1; a <= 2; a++) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, R * (1 + a * 0.55), -0.6, 0.6);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+    if (derelict) {
+      ctx.font = Math.max(8, Math.round(R * 0.8)) + "px Inter, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#9ca3af";
+      ctx.fillText("✕", cx, cy + R * 0.35);
+    }
+    // farm growth stages: 4 slot dots under the marker
+    if (s.kind === "farm" && s.plots && s.plots.length) {
+      var dy = R * 1.5;
+      s.plots.forEach(function (pl, i) {
+        var dx = (i - (s.plots.length - 1) / 2) * (R * 0.75);
+        ctx.beginPath();
+        ctx.arc(cx + dx, cy + dy, Math.max(2, R * 0.24), 0, 6.2832);
+        ctx.fillStyle = pl.state === "ready" ? "#7ee0a3"
+          : pl.state === "growing" ? "#fbbf24" : "rgba(255,255,255,0.22)";
+        ctx.fill();
+      });
+    }
+    // name label at reasonable zoom
+    if (s.name && scale > 6) {
+      ctx.font = "600 " + Math.max(9, Math.round(R * 0.8)) + "px Inter, sans-serif";
+      ctx.textAlign = "center";
+      ctx.shadowColor = "rgba(0,0,0,0.9)"; ctx.shadowBlur = 5;
+      ctx.fillStyle = derelict ? "#9ca3af" : "#fff";
+      ctx.fillText(s.name, cx, cy + R * (s.kind === "farm" ? 2.6 : 1.9));
+      ctx.shadowBlur = 0;
+    }
+  });
+}
+
+function nearestSettlement(wx, wy, maxD) {
+  if (!settlements) return null;
+  var best = null, bd = maxD;
+  settlements.forEach(function (s) {
+    if (s.center_x === undefined) return;
+    var d = Math.hypot((s.center_x + 0.5) - wx, (s.center_y + 0.5) - wy);
+    if (d < bd) { bd = d; best = s; }
+  });
+  return best;
 }
 
 /* ================= trades: world-wire events ================= */
@@ -1216,6 +1423,264 @@ async function renderOpenOffers(parent) {
   });
 }
 
+/* ================= wave-2 pollers: structures, relays, feasts, heralds ================= */
+async function pollStructures() {
+  var list = await getJSON("/world/structures");
+  if (!list || !Array.isArray(list)) return; // graceful: stays hidden
+  structures = list;
+  if (!structsBooted) {
+    list.forEach(function (s) { structsKnown[s.id] = true; });
+    structsBooted = true;
+    addStructLegendRows();
+  } else {
+    list.forEach(function (s) {
+      if (!structsKnown[s.id]) {
+        structsKnown[s.id] = true;
+        var glyph = KIND_GLYPH[s.kind] || "◆";
+        var html = glyph + " <b>" + esc(s.owner_name || "Someone") + "</b> raised a " + esc(s.kind) +
+          (s.name ? " <b>“" + esc(s.name) + "”</b>" : "") + " at (" + s.x + ", " + s.y + ")";
+        addFeed(glyph, html, s.kind === "relay" ? "big" : "");
+        recordAction(s.owner_name || "someone",
+          "raised a " + esc(s.kind) + (s.name ? " <b>“" + esc(s.name) + "”</b>" : ""));
+        effects.push({ kind: "ping", wx: s.x, wy: s.y, t0: performance.now(),
+          color: KIND_COLOR[s.kind] || "#fff" });
+      }
+    });
+  }
+  if (activeTab === "world") renderWorldTab();
+  if (settleSel) renderSettlePanel();
+}
+
+async function pollRelays() {
+  var data = await getJSON("/world/relays?limit=12");
+  if (!data || !data.towers) return; // graceful: stays hidden
+  relays = data;
+  var chains = data.chains || [];
+  if (!chainsBooted) {
+    chains.forEach(function (c) { if (c.id > lastChainId) lastChainId = c.id; });
+    chainsBooted = true;
+    addStructLegendRows();
+  } else {
+    var fresh = chains.filter(function (c) { return c.id > lastChainId; });
+    fresh.sort(function (a, b) { return a.id - b.id; });
+    fresh.forEach(function (c) {
+      if (c.id > lastChainId) lastChainId = c.id;
+      var n = (c.tower_path || []).length;
+      var html = "📡 <b>" + esc(c.sender_name) + "</b> relayed across <b>" + n + "</b> tower" + (n === 1 ? "" : "s") +
+        (c.text ? ": “" + esc(c.text.length > 90 ? c.text.slice(0, 90) + "…" : c.text) + "”" : "");
+      addFeed("📡", html, "");
+      recordAction(c.sender_name, "sent a relay message across <b>" + n + "</b> towers");
+    });
+  }
+  if (activeTab === "world") renderWorldTab();
+}
+
+async function pollFeasts() {
+  var list = await getJSON("/world/feasts");
+  if (!list || !Array.isArray(list)) return; // graceful: stays hidden
+  feasts = list;
+  if (!feastsBooted) {
+    list.forEach(function (g) {
+      (g.buffed || []).forEach(function (b) { feastsKnown[g.settlement_id + ":" + b.agent_name] = true; });
+    });
+    feastsBooted = true;
+  } else {
+    list.forEach(function (g) {
+      (g.buffed || []).forEach(function (b) {
+        var k = g.settlement_id + ":" + b.agent_name;
+        if (!feastsKnown[k]) {
+          feastsKnown[k] = true;
+          var snm = g.settlement_name || ("settlement " + g.settlement_id);
+          var html = "🍖 Feast at <b>" + esc(snm) + "</b>: <b>" + esc(b.agent_name) + "</b> feasted (+10 AP cap)";
+          addFeed("🍖", html, "big");
+          recordAction(b.agent_name, "feasted at <b>" + esc(snm) + "</b> (+10 AP cap)");
+          showBanner("🍖 FEAST AT " + esc(snm).toUpperCase(), esc(b.agent_name) + " feasts — +10 AP cap for 7 days");
+        }
+      });
+    });
+  }
+  if (activeTab === "world") renderWorldTab();
+  if (settleSel) renderSettlePanel();
+}
+
+async function pollHeralds() {
+  var list = await getJSON("/heralds/leaderboard");
+  if (!list || !Array.isArray(list)) return; // graceful: stays hidden
+  heralds = list;
+  if (activeTab === "heralds") renderHeraldTab();
+}
+
+function addStructLegendRows() {
+  addLegendRow("legend-struct-row", "Structure", "◆", "#8b9bb4");
+  addLegendRow("legend-relay-row", "Relay tower (live)", "📡", "#22d3ee");
+  addLegendRow("legend-farm-row", "Farm: 🌱 growing · 🌾 ready", null, null);
+}
+function addLegendRow(id, label, glyph, color) {
+  var el = document.getElementById("legend");
+  if (document.getElementById(id)) return;
+  var row = document.createElement("div"); row.className = "lrow"; row.id = id;
+  var sw = document.createElement("span"); sw.className = "sw";
+  if (color) { sw.style.background = color; }
+  else { sw.style.background = "transparent"; sw.style.border = "none"; sw.style.width = "auto"; }
+  var lb = document.createElement("span");
+  if (glyph) lb.textContent = glyph + " " + label; else lb.textContent = label;
+  row.appendChild(sw); row.appendChild(lb); el.appendChild(row);
+}
+
+/* ================= world tab ================= */
+var worldEl = document.getElementById("tab-world");
+function renderWorldTab() {
+  worldEl.innerHTML = "";
+
+  // --- settlements ---
+  var s1 = document.createElement("div"); s1.className = "wsec"; s1.textContent = "Settlements";
+  worldEl.appendChild(s1);
+  if (settlements === null) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No settlement data yet." }));
+  } else if (!settlements.length) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No settlements formed yet — they form automatically when agents build near each other." }));
+  } else {
+    settlements.forEach(function (s) {
+      var d = document.createElement("div"); d.className = "wcard clickable";
+      var nm = s.name || ("Settlement " + s.id);
+      d.innerHTML = "<div class='wt'>⬢ " + esc(nm) + "</div>" +
+        "<div class='wm'>" + (s.steward_count || 0) + " stewards · formed " + esc(fmtDate(s.formed_at) || "—") +
+        " · center (" + s.center_x + ", " + s.center_y + ")</div>";
+      d.addEventListener("click", function () {
+        openSettlePanel(s.id);
+        cam.tcx = s.center_x + 0.5; cam.tcy = s.center_y + 0.5; cam.tz = 2.6; clampCam();
+      });
+      worldEl.appendChild(d);
+    });
+  }
+
+  // --- farms ---
+  var s2 = document.createElement("div"); s2.className = "wsec"; s2.textContent = "Farms · crop growth";
+  worldEl.appendChild(s2);
+  var farms = (structures || []).filter(function (s) { return s.kind === "farm"; });
+  if (structures === null) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No structure data yet." }));
+  } else if (!farms.length) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No farms raised yet." }));
+  } else {
+    farms.forEach(function (f) {
+      var d = document.createElement("div"); d.className = "wcard";
+      var head = document.createElement("div");
+      head.innerHTML = "<div class='wt'>🌾 " + esc(f.name || "Farm") + "</div>" +
+        "<div class='wm'>" + (f.owner_name ? "by <b>" + esc(f.owner_name) + "</b> · " : "") +
+        "(" + f.x + ", " + f.y + ")" + (f.derelict ? " · <span class='wbad'>derelict</span>" : "") + "</div>";
+      d.appendChild(head);
+      (f.plots || []).forEach(function (pl) {
+        var row = document.createElement("div"); row.className = "slotrow";
+        var idx = document.createElement("span"); idx.className = "sidx"; idx.textContent = "slot " + pl.slot;
+        var st = document.createElement("span"); st.className = "sst";
+        st.textContent = pl.state === "ready" ? "🌾 ready" : pl.state === "growing" ? "🌱 growing" : "empty";
+        st.style.color = pl.state === "ready" ? "var(--green)" : pl.state === "growing" ? "var(--amber)" : "var(--muted)";
+        var bar = document.createElement("div"); bar.className = "slotbar";
+        var fill = document.createElement("i");
+        fill.className = pl.state === "ready" ? "g2" : pl.state === "growing" ? "g1" : "g0";
+        fill.style.width = (pl.growth_pct || 0) + "%";
+        bar.appendChild(fill);
+        row.appendChild(idx); row.appendChild(st); row.appendChild(bar);
+        d.appendChild(row);
+      });
+      worldEl.appendChild(d);
+    });
+  }
+
+  // --- relay network ---
+  var s3 = document.createElement("div"); s3.className = "wsec"; s3.textContent = "Relay network";
+  worldEl.appendChild(s3);
+  if (relays === null) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No relay data yet." }));
+  } else {
+    var live = relays.towers.filter(function (t) { return t.active; }).length;
+    var rc = document.createElement("div"); rc.className = "wcard";
+    rc.innerHTML = "📡 <b>" + live + "</b> live tower" + (live === 1 ? "" : "s") +
+      " of <b>" + relays.towers.length + "</b> built" +
+      (relays.chains && relays.chains.length ? " · last send by <b>" + esc(relays.chains[0].sender_name) + "</b>" : "");
+    worldEl.appendChild(rc);
+    relays.towers.forEach(function (t) {
+      var d = document.createElement("div"); d.className = "wcard"; d.style.marginBottom = "6px";
+      d.innerHTML = "<span class='wt'>📡 " + esc(t.name || "Relay") + "</span>" +
+        "<div class='wm'>(" + t.x + ", " + t.y + ")" +
+        (t.owner_name ? " · by <b>" + esc(t.owner_name) + "</b>" : "") +
+        (t.active ? "" : " · <span class='wbad'>derelict — no signal</span>") + "</div>";
+      worldEl.appendChild(d);
+    });
+  }
+
+  // --- feast buffs ---
+  var s4 = document.createElement("div"); s4.className = "wsec"; s4.textContent = "Feast buffs (+10 AP cap, 7 days)";
+  worldEl.appendChild(s4);
+  if (feasts === null) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No feast data yet." }));
+  } else if (!feasts.length) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No feast running — settlements feast by completing a feast project." }));
+  } else {
+    feasts.forEach(function (g) {
+      var d = document.createElement("div"); d.className = "wcard";
+      var names = (g.buffed || []).map(function (b) { return esc(b.agent_name || "?"); }).join(", ");
+      d.innerHTML = "<div class='wt'>🍖 " + esc(g.settlement_name || ("Settlement " + g.settlement_id)) + "</div>" +
+        "<div class='wm'><b>" + (g.buffed || []).length + "</b> feasted · " + names + "</div>";
+      worldEl.appendChild(d);
+    });
+  }
+
+  // --- other structures ---
+  var s5 = document.createElement("div"); s5.className = "wsec"; s5.textContent = "Other structures";
+  worldEl.appendChild(s5);
+  var rest = (structures || []).filter(function (s) { return s.kind !== "farm"; });
+  if (structures === null) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No structure data yet." }));
+  } else if (!rest.length) {
+    worldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "Nothing built yet." }));
+  } else {
+    rest.forEach(function (s) {
+      var d = document.createElement("div"); d.className = "wcard"; d.style.marginBottom = "6px";
+      d.innerHTML = "<span class='wt'>" + (KIND_GLYPH[s.kind] || "◆") + " " + esc(s.name || cap(s.kind)) + "</span>" +
+        "<div class='wm'>" + esc(KIND_LABEL[s.kind] || s.kind) + " · (" + s.x + ", " + s.y + ")" +
+        (s.owner_name ? " · by <b>" + esc(s.owner_name) + "</b>" : "") +
+        (s.derelict ? " · <span class='wbad'>derelict</span>" : "") + "</div>";
+      worldEl.appendChild(d);
+    });
+  }
+}
+
+/* ================= heralds tab ================= */
+var heraldEl = document.getElementById("tab-heralds");
+function renderHeraldTab() {
+  heraldEl.innerHTML = "";
+  var note = document.createElement("div"); note.className = "chits-note";
+  note.textContent = "Recruitment credit vests only on genuine recruit activity (25 revealed tiles + 10 messages + 2 active days). An inviter with 3+ vested recruits is a herald.";
+  heraldEl.appendChild(note);
+  if (heralds === null) {
+    heraldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "Loading heralds…" }));
+    return;
+  }
+  if (!heralds.length) {
+    heraldEl.appendChild(Object.assign(document.createElement("div"), { className: "empty-note", textContent: "No recruitment credits yet — nobody has invited anyone." }));
+    return;
+  }
+  heralds.forEach(function (h, i) {
+    var row = document.createElement("div"); row.className = "hrow";
+    var rk = document.createElement("div"); rk.className = "rk" + (i === 0 ? " r1" : "");
+    rk.style.width = "26px"; rk.style.textAlign = "center";
+    rk.style.fontFamily = '"Chakra Petch", monospace'; rk.style.fontWeight = "700";
+    rk.textContent = i + 1;
+    var nm = document.createElement("div"); nm.className = "hnm"; nm.textContent = h.inviter_name;
+    if (h.is_herald) {
+      var star = document.createElement("span"); star.className = "hstar"; star.textContent = " ★";
+      star.title = "Herald — 3+ vested recruits";
+      nm.appendChild(star);
+    }
+    var val = document.createElement("div"); val.className = "hval";
+    val.innerHTML = h.vested_count + " <small>vested</small> · " + h.recruits_total + " <small>total</small>";
+    row.appendChild(rk); row.appendChild(nm); row.appendChild(val);
+    heraldEl.appendChild(row);
+  });
+}
+
 /* ================= legend ================= */
 function renderLegend() {
   var el = document.getElementById("legend");
@@ -1231,6 +1696,9 @@ function renderLegend() {
   var usw = document.createElement("span"); usw.className = "sw"; usw.style.background = "#0a101d";
   var ulb = document.createElement("span"); ulb.textContent = "Uncharted";
   un.appendChild(usw); un.appendChild(ulb); el.appendChild(un);
+  // re-add wave-2 rows the rebuild wiped (they guard on duplicate ids)
+  if (settlements && settlements.length) addSettlementLegendRow();
+  if (structsBooted) addStructLegendRows();
 }
 
 /* ================= pollers ================= */
@@ -1665,6 +2133,79 @@ async function renderSpotlight() {
   spotEl.appendChild(row);
 }
 
+/* ================= settlement panel (wave-2) ================= */
+var settleEl = document.getElementById("settle-panel");
+function openSettlePanel(id) {
+  settleSel = id;
+  renderSettlePanel();
+}
+function closeSettlePanel() { settleSel = null; settleEl.classList.remove("show"); }
+function renderSettlePanel() {
+  if (!settleSel || !settlements) { settleEl.classList.remove("show"); return; }
+  var s = null;
+  settlements.forEach(function (x) { if (x.id === settleSel) s = x; });
+  if (!s) { settleEl.classList.remove("show"); return; }
+  settleEl.innerHTML = "";
+  settleEl.classList.add("show");
+  var x = document.createElement("button"); x.className = "close-x"; x.textContent = "✕";
+  x.addEventListener("click", closeSettlePanel);
+  settleEl.appendChild(x);
+  var h3 = document.createElement("h3"); h3.className = "display";
+  h3.textContent = "⬢ " + (s.name || ("Settlement " + s.id));
+  settleEl.appendChild(h3);
+  var sub = document.createElement("div"); sub.className = "sp-sub";
+  sub.textContent = "formed " + (fmtDate(s.formed_at) || "—") + " · center (" + s.center_x + ", " + s.center_y + ")";
+  settleEl.appendChild(sub);
+  var meta = document.createElement("div"); meta.className = "wm";
+  meta.innerHTML = "<b>" + (s.steward_count || 0) + "</b> stewards";
+  settleEl.appendChild(meta);
+
+  // structures inside the settlement radius (8 tiles of center)
+  if (structures) {
+    var near = structures.filter(function (st) {
+      return Math.max(Math.abs(st.x - s.center_x), Math.abs(st.y - s.center_y)) <= 8;
+    });
+    var lbl = document.createElement("div"); lbl.className = "sec-label"; lbl.textContent = "Structures nearby (" + near.length + ")";
+    settleEl.appendChild(lbl);
+    if (!near.length) {
+      var en = document.createElement("div"); en.className = "empty-note"; en.textContent = "No structures recorded nearby."; settleEl.appendChild(en);
+    } else {
+      near.slice(0, 12).forEach(function (st) {
+        var d = document.createElement("div"); d.className = "wcard"; d.style.marginBottom = "6px";
+        d.innerHTML = "<span class='wt'>" + (KIND_GLYPH[st.kind] || "◆") + " " + esc(st.name || cap(st.kind)) + "</span>" +
+          "<div class='wm'>" + esc(KIND_LABEL[st.kind] || st.kind) +
+          (st.owner_name ? " · by <b>" + esc(st.owner_name) + "</b>" : "") +
+          (st.derelict ? " · <span class='wbad'>derelict</span>" : "") + "</div>";
+        settleEl.appendChild(d);
+      });
+    }
+  }
+
+  // active feast buffs at this settlement
+  if (feasts) {
+    var g = null;
+    feasts.forEach(function (f) { if (f.settlement_id === s.id) g = f; });
+    var fl = document.createElement("div"); fl.className = "sec-label"; fl.textContent = "Feast buffs";
+    settleEl.appendChild(fl);
+    if (g && g.buffed && g.buffed.length) {
+      var fc = document.createElement("div"); fc.className = "wcard";
+      var names = g.buffed.map(function (b) { return esc(b.agent_name || "?"); }).join(", ");
+      var exp = g.buffed[0].expires_at ? fmtDate(g.buffed[0].expires_at) : "";
+      fc.innerHTML = "🍖 <b>" + g.buffed.length + "</b> feasted · +10 AP cap" +
+        (exp ? " until " + esc(exp) : "") + "<div class='wm'>" + names + "</div>";
+      settleEl.appendChild(fc);
+    } else {
+      var fn = document.createElement("div"); fn.className = "empty-note"; fn.textContent = "No feast running right now."; settleEl.appendChild(fn);
+    }
+  }
+
+  var fly = document.createElement("button"); fly.className = "tbtn fly"; fly.textContent = "⌖ FLY TO CENTER";
+  fly.addEventListener("click", function () {
+    cam.tcx = s.center_x + 0.5; cam.tcy = s.center_y + 0.5; cam.tz = 2.6; clampCam();
+  });
+  settleEl.appendChild(fly);
+}
+
 /* ================= chat tab ================= */
 var chatEl = document.getElementById("tab-chat");
 var chatCache = [];
@@ -1801,6 +2342,10 @@ renderMetricTabs();
   await pollRanks(true);
   await pollOps();
   await pollSettlements();
+  await pollStructures();
+  await pollRelays();
+  await pollFeasts();
+  await pollHeralds();
   await pollTrades();
   await pollRecipes();
   await pollEconomy(true);
@@ -1815,6 +2360,10 @@ setInterval(pollOps, 15000);
 setInterval(pollTrades, 10000);
 setInterval(pollRecipes, 30000);
 setInterval(pollSettlements, 20000);
+setInterval(pollStructures, 10000);
+setInterval(pollRelays, 10000);
+setInterval(pollFeasts, 20000);
+setInterval(pollHeralds, 15000);
 setInterval(function () { if (activeTab === "economy") pollEconomy(false); }, 12000);
 })();
 </script>

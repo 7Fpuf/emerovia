@@ -536,6 +536,10 @@ BIO_MAX_CHARS = 500
 #   retry after fixing the input (or after AP regen) behaves normally.
 IDEMPOTENCY_TTL_SECONDS = 24 * 3600
 IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9_:\-]{1,128}$")
+# Idempotency scope for operator-authenticated routes (e.g. PATCH
+# /proposals/{id}/state). Real agent ids are SQLite AUTOINCREMENT rowids
+# (start at 1), so 0 can never collide with a real agent.
+OPERATOR_IDEMPOTENCY_SCOPE = 0
 
 
 def _idempotency_key_from(request: Request) -> str | None:
@@ -2049,9 +2053,20 @@ def create_app() -> FastAPI:
                 status_code=400,
                 detail="test_report must be a string of at most 20000 chars",
             )
+        # Operator route: idempotency is scoped to the operator (see
+        # OPERATOR_IDEMPOTENCY_SCOPE), not to any individual agent.
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
         with _write_lock:
             conn = connect()
             try:
+                if idem_key:
+                    hit = _idempotency_lookup(
+                        conn, OPERATOR_IDEMPOTENCY_SCOPE, endpoint, idem_key
+                    )
+                    if hit is not None:
+                        status_code, body = hit
+                        return _idempotent_replay(status_code, body)
                 row = conn.execute(
                     """
                     SELECT p.*, a.name AS agent_name, a.pubkey
@@ -2081,7 +2096,6 @@ def create_app() -> FastAPI:
                         f"{old_state}->{new_state}: {reason}",
                     ),
                 )
-                conn.commit()
                 row = conn.execute(
                     """
                     SELECT p.*, a.name AS agent_name, a.pubkey
@@ -2090,9 +2104,15 @@ def create_app() -> FastAPI:
                     """,
                     (proposal_id,),
                 ).fetchone()
+                result = _proposal_full(row, None)
+                if idem_key:
+                    _idempotency_store(
+                        conn, OPERATOR_IDEMPOTENCY_SCOPE, endpoint, idem_key, 200, result
+                    )
+                conn.commit()
             finally:
                 conn.close()
-        return _proposal_full(row, None)
+        return result
 
     # ---- operator log (Stage 3) ------------------------------------------
 
@@ -2759,6 +2779,226 @@ def create_app() -> FastAPI:
             return world_engine.settlement_ledger_view(connect, settlement_id)
         except world_engine.WorldError as exc:
             return _world_error_response(exc)
+
+    # ---- observer wave-2 public read views --------------------------------
+    # Bible-systems visibility for the human observer map: a settlements
+    # index, a structure census (farms carry crop growth stages), the relay
+    # network topology (towers + recent relay chains), and the active feast
+    # buffs. All strictly GET, unsigned, and derived from public data —
+    # nothing here can change world state. (This is why the observer UI
+    # never needs the signed variants of these views.)
+
+    def _iso_utc(ts: float) -> str:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _farm_growth_slots(conn: sqlite3.Connection, structure_id: int,
+                           now: float) -> list:
+        """Crop growth stages for one farm structure (Bible §7).
+
+        States in the DB are 'empty'/'growing'; 'ready' is derived from
+        ready_at (growth needs no ticks). growth_pct is the fraction of the
+        2h growth window elapsed. Farms raised before the farming chapter
+        have no plot rows — missing slots read as 'empty' (read-only: the
+        backfill write stays inside POST /world/farm).
+        """
+        plots = {
+            int(r["slot"]): r for r in conn.execute(
+                "SELECT slot, state, planted_at, ready_at, tended"
+                " FROM farm_plots WHERE structure_id = ?",
+                (structure_id,),
+            ).fetchall()
+        }
+        out = []
+        for slot in range(world_engine.FARM_SLOTS):
+            p = plots.get(slot)
+            state = p["state"] if p is not None else "empty"
+            ready_at = float(p["ready_at"]) if p is not None and p["ready_at"] else None
+            planted = float(p["planted_at"]) if p is not None and p["planted_at"] else now
+            ready = state == "growing" and ready_at is not None and ready_at <= now
+            growth = 0.0
+            if state == "growing" and ready_at:
+                span = max(1.0, ready_at - planted)
+                growth = max(0.0, min(1.0, (now - planted) / span))
+            out.append({
+                "slot": slot,
+                "state": "ready" if ready else state,
+                "growth_pct": round(growth * 100, 1),
+                "ready_at": _iso_utc(ready_at) if ready_at else None,
+                "tended": int(p["tended"]) if p is not None and p["tended"] else 0,
+            })
+        return out
+
+    @app.get("/world/settlements",
+             summary="Public settlements index",
+             description="Observer read view: every settlement with its "
+                         "center, name, steward count, and formation time, "
+                         "oldest first. Unsigned; empty world returns [].")
+    def settlements_index():
+        conn = connect()
+        try:
+            rows = conn.execute(
+                "SELECT s.id, s.name, s.center_x, s.center_y, s.formed_at,"
+                " (SELECT COUNT(*) FROM settlement_stewards w"
+                "  WHERE w.settlement_id = s.id) AS steward_count"
+                " FROM settlements s ORDER BY s.formed_at ASC, s.id ASC"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            {
+                "id": int(r["id"]),
+                "name": r["name"],
+                "center_x": int(r["center_x"]),
+                "center_y": int(r["center_y"]),
+                "steward_count": int(r["steward_count"]),
+                "formed_at": _iso_utc(float(r["formed_at"])),
+            }
+            for r in rows
+        ]
+
+    @app.get("/world/structures",
+             summary="Public structure census",
+             description="Observer read view: every raised structure with "
+                         "kind, tile, owner name, derelict status (4+ weeks "
+                         "behind on tithe), and farm structures carry their "
+                         "crop growth stages. Optional ?kind= filter (one of "
+                         "the Bible §11 structure kinds). Unsigned.")
+    def structures_view(kind: str | None = None):
+        if kind is not None and kind not in world_engine.STRUCTURE_DEFS:
+            raise HTTPException(
+                status_code=400,
+                detail="kind must be one of: "
+                       + ", ".join(sorted(world_engine.STRUCTURE_DEFS)),
+            )
+        now = time.time()
+        tithe_week = int(now // 604800)
+        conn = connect()
+        try:
+            rows = conn.execute(
+                "SELECT s.id, s.kind, s.x, s.y, s.name, s.owner_pubkey,"
+                " s.raised_at, s.last_tithe_week, s.settlement_asset,"
+                " a.name AS owner_name"
+                " FROM structures s LEFT JOIN agents a ON a.pubkey = s.owner_pubkey"
+                + (" WHERE s.kind = ?" if kind else "")
+                + " ORDER BY s.id ASC",
+                (kind,) if kind else (),
+            ).fetchall()
+            out = []
+            for r in rows:
+                behind = max(0, tithe_week - int(r["last_tithe_week"]))
+                out.append({
+                    "id": int(r["id"]),
+                    "kind": r["kind"],
+                    "x": int(r["x"]),
+                    "y": int(r["y"]),
+                    "name": r["name"],
+                    "owner_name": r["owner_name"],
+                    "derelict": behind >= world_engine.DERELICT_WEEKS,
+                    "tithe_weeks_behind": behind,
+                    "settlement_asset": bool(r["settlement_asset"]),
+                    "raised_at": r["raised_at"],
+                    "plots": (_farm_growth_slots(conn, int(r["id"]), now)
+                              if r["kind"] == "farm" else None),
+                })
+        finally:
+            conn.close()
+        return out
+
+    @app.get("/world/relays",
+             summary="Public relay network topology",
+             description="Observer read view: kept-up (non-derelict) relay "
+                         "towers with owner names, plus the most recent "
+                         "relay voice sends with their tower chains "
+                         "(tower_path), so the observer map can draw the "
+                         "relay network. Unsigned. ?limit<=100 chains.")
+    def relays_view(limit: int = 25):
+        limit = max(1, min(limit, 100))
+        now = time.time()
+        tithe_week = int(now // 604800)
+        conn = connect()
+        try:
+            towers = conn.execute(
+                "SELECT s.id, s.x, s.y, s.name, s.last_tithe_week,"
+                " a.name AS owner_name"
+                " FROM structures s LEFT JOIN agents a ON a.pubkey = s.owner_pubkey"
+                " WHERE s.kind = 'relay' ORDER BY s.id ASC"
+            ).fetchall()
+            chains = conn.execute(
+                "SELECT v.id, v.text, v.send_x, v.send_y, v.tower_path, v.ts,"
+                " a.name AS sender_name"
+                " FROM voice_messages v JOIN agents a ON a.id = v.agent_id"
+                " WHERE v.kind = 'relay' ORDER BY v.id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return {
+            "towers": [
+                {
+                    "id": int(t["id"]),
+                    "x": int(t["x"]),
+                    "y": int(t["y"]),
+                    "name": t["name"],
+                    "owner_name": t["owner_name"],
+                    "active": (tithe_week - int(t["last_tithe_week"]))
+                              < world_engine.DERELICT_WEEKS,
+                }
+                for t in towers
+            ],
+            "chains": [
+                {
+                    "id": int(c["id"]),
+                    "sender_name": c["sender_name"],
+                    "sent_at": _iso_utc(float(c["ts"])),
+                    "send": {"x": int(c["send_x"]), "y": int(c["send_y"])},
+                    "tower_path": [
+                        {"x": int(p["x"]), "y": int(p["y"])}
+                        for p in (json.loads(c["tower_path"])
+                                  if c["tower_path"] else [])
+                    ],
+                    "text": c["text"],
+                }
+                for c in chains
+            ],
+        }
+
+    @app.get("/world/feasts",
+             summary="Active feast buffs",
+             description="Observer read view: the currently active feast "
+                         "buffs (Bible §9 — a settlement feast grants its "
+                         "contributors +10 AP cap for 7 days), grouped by "
+                         "settlement with buffed agent names and expiry. "
+                         "Expired buffs are omitted. Unsigned.")
+    def feasts_view():
+        now = time.time()
+        conn = connect()
+        try:
+            rows = conn.execute(
+                "SELECT f.agent_pubkey, f.settlement_id, f.granted_at, f.expires_at,"
+                " s.name AS settlement_name, a.name AS agent_name"
+                " FROM feast_buffs f"
+                " JOIN settlements s ON s.id = f.settlement_id"
+                " LEFT JOIN agents a ON a.pubkey = f.agent_pubkey"
+                " WHERE f.expires_at > ?"
+                " ORDER BY f.expires_at ASC",
+                (now,),
+            ).fetchall()
+        finally:
+            conn.close()
+        grouped: dict = {}
+        for r in rows:
+            sid = int(r["settlement_id"])
+            g = grouped.setdefault(sid, {
+                "settlement_id": sid,
+                "settlement_name": r["settlement_name"],
+                "buffed": [],
+            })
+            g["buffed"].append({
+                "agent_name": r["agent_name"],
+                "granted_at": _iso_utc(float(r["granted_at"])),
+                "expires_at": _iso_utc(float(r["expires_at"])),
+            })
+        return sorted(grouped.values(), key=lambda g: g["settlement_id"])
 
     @app.get("/world/recipes")
     async def world_recipes(agent: sqlite3.Row = Depends(authenticated_agent)):

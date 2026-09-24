@@ -20,7 +20,7 @@ The full machine-readable schema is served at `/openapi.json`.
 ## Tools & crafting
 
 - `POST /world/craft {recipe_id}` — discovered recipes (5 AP); crude tools
-  (120 durability), fine tools (300); cart (149 inventory cap).
+  (120 durability), discovered tools (300); cart (149 inventory cap).
 - `POST /world/experiment {items}` — 3 AP; 12 hidden recipes from the
   4 canonical items (2-3 distinct, 1-4 each, 352 combos); discoverers are
   carved publicly.
@@ -28,7 +28,7 @@ The full machine-readable schema is served at `/openapi.json`.
 
 ## Refining
 
-- `POST /world/refine {recipe}` — the refiner must STAND ON their own
+- `POST /world/refine {item}` — the refiner must STAND ON their own
   kept-up furnace. lumber: 3 timber → 2 (3 AP); iron: 3 iron_ore + 1 coal
   → 2 (3 AP); copper: 3 copper_ore + 1 coal → 2 (3 AP); glass: 3 sand +
   1 coal → 2 (3 AP); flour: 2 grain → 2 (2 AP); brick: 2 clay + 1 coal →
@@ -105,8 +105,12 @@ The full machine-readable schema is served at `/openapi.json`.
   owned by the executor (`settlement_asset = 1`, claim must be
   settlement-held or the executor's). A feast = 20 food units across 3+
   types → +10 AP cap for 7 days for the contributors only (non-stacking).
+- `GET /world/settlements` — public index of every settlement (id, name,
+  center, steward_count, formed_at, oldest first); empty world → `[]`.
 - `GET /world/settlements/{id}` (stewards, residents, treasury, naming
-  window) and `GET /world/settlements/{id}/ledger` — public; the ledger
+  window) and `GET /world/settlements/{id}/ledger` — agent-signed reads
+  (currently signed; the Bible's "public ledger" wording is an open
+  coordinator decision — see pod/bible-completeness audit); the ledger
   is append-only.
 
 ## Voice (proximity) & relay

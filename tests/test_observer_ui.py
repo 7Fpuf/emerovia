@@ -68,9 +68,10 @@ def html_text() -> str:
 
 # ------------------------------------------------------- 1. tabs and views
 
-EXPECTED_TABS = ["feed", "agents", "ranks", "chat", "props", "ops", "economy"]
-EXPECTED_VIEWS = ["tab-feed", "tab-agents", "tab-ranks", "tab-chat",
-                  "tab-props", "tab-ops", "tab-economy"]
+EXPECTED_TABS = ["feed", "agents", "ranks", "heralds", "world", "chat", "props", "ops", "economy"]
+EXPECTED_VIEWS = ["tab-feed", "tab-agents", "tab-ranks", "tab-heralds",
+                  "tab-world", "tab-chat", "tab-props", "tab-ops",
+                  "tab-economy"]
 
 
 def test_expected_tabs_exist(dom: TagCollector) -> None:
@@ -83,7 +84,7 @@ def test_expected_views_exist(dom: TagCollector) -> None:
     found = {a["id"] for a in dom.tags_with("div") if "id" in a}
     for view in EXPECTED_VIEWS:
         assert view in found, f"missing tab view: #{view}"
-    for el in ("season-badge", "spotlight", "ticker-inner", "banner-zone", "modal-wrap"):
+    for el in ("season-badge", "spotlight", "settle-panel", "ticker-inner", "banner-zone", "modal-wrap"):
         assert el in found, f"missing element: #{el}"
 
 
@@ -172,6 +173,37 @@ def test_no_placeholder_content(html_text: str) -> None:
 
 
 # ------------------------------------------------ 4. PWA assets exist
+
+# ------------------------------------------------ 4. wave-2: bible systems layer
+
+WAVE2_ENDPOINTS = ["/world/settlements", "/world/structures", "/world/relays",
+                   "/world/feasts", "/heralds/leaderboard"]
+
+
+def test_wave2_endpoints_polled(html_text: str) -> None:
+    # the UI must poll the wave-2 read views through getJSON (unsigned GET)
+    for ep in WAVE2_ENDPOINTS:
+        assert ep in html_text, f"UI never polls {ep}"
+
+
+def test_wave2_map_layers(html_text: str) -> None:
+    # structure markers, relay-chain polylines, settlement tap-to-panel
+    for token in ("drawStructures", "drawRelayChains", "nearestSettlement",
+                  "openSettlePanel", "KIND_GLYPH", "tower_path"):
+        assert token in html_text, f"missing wave-2 map layer: {token}"
+
+
+def test_wave2_farm_growth_render(html_text: str) -> None:
+    # farm growth stages: 4 slot dots on the map + progress bars in WORLD tab
+    for token in ("growth_pct", "slotbar", "Farm", "🌾"):
+        assert token in html_text, f"missing farm growth rendering: {token}"
+
+
+def test_wave2_herald_and_feast_render(html_text: str) -> None:
+    # herald leaderboard tab + feast buffs surface
+    for token in ("renderHeraldTab", "is_herald", "Feast buffs", "+10 AP cap"):
+        assert token in html_text, f"missing wave-2 render: {token}"
+
 
 def test_pwa_assets_referenced_exist(dom: TagCollector) -> None:
     refs: set[str] = set()
@@ -299,8 +331,11 @@ def test_signed_only_endpoints_degrade_gracefully(client: TestClient) -> None:
     # /world/recipes is agent-signed; the unsigned observer must not get data
     # and the UI treats that as "not available yet".
     assert client.get("/world/recipes").status_code in (401, 403)
-    # the settlements index does not exist yet -> 404, UI hides the layer
-    assert client.get("/world/settlements").status_code == 404
+    # the settlements index is public (Bible §5 discoverability): unsigned
+    # GET returns 200 with a JSON array, [] on an empty world.
+    r = client.get("/world/settlements")
+    assert r.status_code == 200
+    assert r.json() == []
 
 
 def test_agent_row_shapes_after_register(client: TestClient) -> None:

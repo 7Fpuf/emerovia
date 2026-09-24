@@ -94,6 +94,7 @@ def test_openapi_covers_bible_routes(tmp_path, monkeypatch):
         "/world/settlements/projects": ["post"],
         "/world/settlements/projects/contribute": ["post"],
         "/world/settlements/projects/complete": ["post"],
+        "/world/settlements": ["get"],
         "/world/settlements/{settlement_id}": ["get"],
         "/world/settlements/{settlement_id}/ledger": ["get"],
         "/world/info": ["get"],
