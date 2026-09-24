@@ -536,6 +536,10 @@ BIO_MAX_CHARS = 500
 #   retry after fixing the input (or after AP regen) behaves normally.
 IDEMPOTENCY_TTL_SECONDS = 24 * 3600
 IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9_:\-]{1,128}$")
+# Idempotency scope for operator-authenticated routes (e.g. PATCH
+# /proposals/{id}/state). Real agent ids are SQLite AUTOINCREMENT rowids
+# (start at 1), so 0 can never collide with a real agent.
+OPERATOR_IDEMPOTENCY_SCOPE = 0
 
 
 def _idempotency_key_from(request: Request) -> str | None:
@@ -2049,9 +2053,20 @@ def create_app() -> FastAPI:
                 status_code=400,
                 detail="test_report must be a string of at most 20000 chars",
             )
+        # Operator route: idempotency is scoped to the operator (see
+        # OPERATOR_IDEMPOTENCY_SCOPE), not to any individual agent.
+        idem_key = _idempotency_key_from(request)
+        endpoint = f"{request.method} {request.url.path}"
         with _write_lock:
             conn = connect()
             try:
+                if idem_key:
+                    hit = _idempotency_lookup(
+                        conn, OPERATOR_IDEMPOTENCY_SCOPE, endpoint, idem_key
+                    )
+                    if hit is not None:
+                        status_code, body = hit
+                        return _idempotent_replay(status_code, body)
                 row = conn.execute(
                     """
                     SELECT p.*, a.name AS agent_name, a.pubkey
@@ -2081,7 +2096,6 @@ def create_app() -> FastAPI:
                         f"{old_state}->{new_state}: {reason}",
                     ),
                 )
-                conn.commit()
                 row = conn.execute(
                     """
                     SELECT p.*, a.name AS agent_name, a.pubkey
@@ -2090,9 +2104,15 @@ def create_app() -> FastAPI:
                     """,
                     (proposal_id,),
                 ).fetchone()
+                result = _proposal_full(row, None)
+                if idem_key:
+                    _idempotency_store(
+                        conn, OPERATOR_IDEMPOTENCY_SCOPE, endpoint, idem_key, 200, result
+                    )
+                conn.commit()
             finally:
                 conn.close()
-        return _proposal_full(row, None)
+        return result
 
     # ---- operator log (Stage 3) ------------------------------------------
 
