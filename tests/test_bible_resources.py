@@ -289,6 +289,29 @@ def test_open_offer_ore_renamed(b1):
         conn.close()
 
 
+def test_open_offer_ore_and_iron_ore_merge_to_sum(b1):
+    client, keys, db_path, appmod = b1
+    conn = db(db_path)
+    try:
+        # A legacy offer naming both ore and iron_ore on one side must merge
+        # to a summed iron_ore (1:1 ruling), not silently drop ore.
+        conn.execute(
+            "INSERT INTO trade_offers (maker_id, give_json, want_json, status, created_at)"
+            " VALUES (1, ?, ?, 'open', ?)",
+            ('{"ore":3,"iron_ore":4}', '{"chits":5}', "2026-01-01T00:00:00+00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    importlib.reload(appmod)
+    conn = db(db_path)
+    try:
+        row = conn.execute("SELECT give_json FROM trade_offers").fetchone()
+        assert json.loads(row["give_json"]) == {"iron_ore": 7}
+    finally:
+        conn.close()
+
+
 def test_legacy_glass_veins_stay_gatherable(b1):
     _, _, db_path, _ = b1
     conn = db(db_path)

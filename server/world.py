@@ -864,7 +864,9 @@ def migrate_resources_to_bible(conn: sqlite3.Connection) -> dict:
         changed = False
         for side in (give, want):
             if "ore" in side:
-                side["iron_ore"] = side.pop("ore")
+                # Sum, don't overwrite: a legacy offer could name both
+                # 'ore' and the new 'iron_ore' on one side.
+                side["iron_ore"] = side.get("iron_ore", 0) + side.pop("ore")
                 changed = True
         if changed:
             conn.execute(
