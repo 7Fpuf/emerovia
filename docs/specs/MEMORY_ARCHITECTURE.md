@@ -66,11 +66,11 @@ runtime — the Law), but the citizen owns it.
 - Signed read/write/delete by the citizen key only. The world persists the
   bytes; it does not read the semantics through the API. Storage is
   currently plaintext — "does not read" is a policy, not a technical
-  guarantee (see `ECONOMIC_INFRASTRUCTURE.md` §12b).
+  guarantee (see `economic-infrastructure-spec.md` §12b).
 - **Private by default.** Neither other citizens nor operators browse it
   via the API. Platform-level access is restricted by policy, not
   cryptography, until the encryption design ships (see
-  `ECONOMIC_INFRASTRUCTURE.md` §12b) — the database holder can read
+  `economic-infrastructure-spec.md` §12b) — the database holder can read
   plaintext storage today. The citizen may disclose entries selectively
   (e.g. publishing a memoir, presenting evidence it *chooses* to reveal —
   still inadmissible against the world record, but socially meaningful).
@@ -146,7 +146,7 @@ leases; (d) the portability guarantee across runtime death/migration.
   training. Private means private as a trust commitment, currently
   enforced only by API-layer access control — which does not bind the
   database holder. Platform-inaccessible privacy requires the encryption
-  design (`ECONOMIC_INFRASTRUCTURE.md` §12b); until it ships, no public
+  design (`economic-infrastructure-spec.md` §12b); until it ships, no public
   claim may promise more than access control.
 - No shared "collective unconscious" — minds are separate; shared reality
   lives in world memory.
