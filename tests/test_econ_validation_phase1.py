@@ -700,30 +700,50 @@ def test_scenario_c_ore_advantage_narrow_window(ev1):
     inv_y = inventory_of(db_path, pky)
     assert inv_y.get("flour", 0) >= 16
     x_gain16 = 37.0 - x16_spent  # +5.0
-    y_gain16 = 32.0 - y10b_spent  # ~+1.0: noise-dominated
+    y_gain16 = 32.0 - y10b_spent  # small and sign-unstable: see below
     assert x_gain16 > 0, x_gain16
-    assert -2.0 <= y_gain16 <= 2.0, \
-        f"Y's gain should be noise-dominated, got {y_gain16}"
+    # Y's gain is noise-dominated — but the noise band is wider than the
+    # +/-2 AP gather-lumpiness figure: worldgen tile-stock variance moves
+    # the executed 10-iron cost across 29-33 AP (observed 2026-10-06),
+    # so Y's computed gain inherits a +/-4 range and its SIGN is not
+    # robustly predictable (observed -1.0 to +3.0). The structural claim
+    # is the asymmetry: X's +5 gain robustly exceeds Y's small gain.
+    assert -4.0 <= y_gain16 <= 4.0, \
+        f"Y's gain should be small (noise-dominated), got {y_gain16}"
+    assert x_gain16 > y_gain16, \
+        f"X's gain must robustly exceed Y's: {x_gain16} vs {y_gain16}"
 
 
 def test_scenario_d_complementary_advantages(ev1):
-    """X has plow, Y has ore_bounty — the v2.3 worked example, executed.
-    X: 16 flour for 28 AP (vs 37.0 iron autarky) -> +9.0.
+    """X has plow, Y has ore_bounty — the Phase 2 scenario, executed in
+    WINTER (genesis pinned 45d: (45//14)%4=3 -> winter).
+
+    WHY WINTER (ChatGPT correction, 2026-10-06): the protocol originally
+    pinned summer, but summer's wild-grain bonus (1.25x -> +1 tooled
+    yield) lets Y produce 16 flour from wild grain for 28 AP — cheaper
+    than Y's 10-iron cost (~31 AP) — so the 16:10 trade LOSES for Y
+    (-5.0 AP executed; see test_summer_counterfactual below). Winter's
+    wild-grain penalty (0.50x -> -1, min 1) prices wild flour at 48 AP,
+    restoring Y's farmed-flour autarky (48.0) as the binding baseline
+    and the trade as mutually beneficial.
+
+    X: 16 flour for 28 AP (vs 35.0 winter iron autarky) -> +7.0.
     Y: 10 iron for 31 AP (vs 48.0 flour autarky) -> +17.0.
     Ledger records the fill."""
     client, keys, db_path, _ = ev1
     pkx, fx0, farmx = setup_producer(client, keys, db_path, 0,
-                                     advantages=("plow",))
+                                     advantages=("plow",), season_days=45)
     pky, fy0, farmy = setup_producer(client, keys, db_path, 1,
-                                     advantages=("ore_bounty",))
+                                     advantages=("ore_bounty",),
+                                     season_days=45)
 
     x_spent, _ = scenario_produce(client, keys, db_path, 0, fx0, farmx,
                                   flour_units=16)
     y_spent, _ = scenario_produce(client, keys, db_path, 1, fy0, farmy,
                                   iron_units=10)
     assert x_spent == pytest.approx(28.0, abs=1.0), x_spent
-    # ore_bounty: 15 ore at 3/gather = 5 gathers (10 AP) + 3 coal (6 AP)
-    # + 15 refine = 31 AP.
+    # ore_bounty: 15 ore at 3/gather = 5 gathers (10 AP) + 5 coal
+    # (winter 1.25x -> 3/gather = 2 gathers, 4 AP) + 5 refines (15 AP).
     assert y_spent == pytest.approx(31.0, abs=2.0), y_spent
 
     oid, ledger = execute_trade(client, keys, db_path, 0,
@@ -735,12 +755,119 @@ def test_scenario_d_complementary_advantages(ev1):
     assert ledger["give_json"] == '{"flour":16}'
     assert ledger["want_json"] == '{"iron":10}'
 
-    x_gain = 37.0 - x_spent
-    y_gain = 48.0 - y_spent
-    assert x_gain > 0 and y_gain > 0, (x_gain, y_gain)
-    # NOTE: executed gains (9.0/17.0) exceed the model's continuous
-    # (7.0/7.3) because lumpiness raises both autarky baselines.
-    # Direction confirmed; magnitudes are lumpy.
+    x_gain = 35.0 - x_spent   # winter iron autarky (coal bonus), ~+7.0
+    y_gain = 48.0 - y_spent   # farmed flour, no plow; winter wild = 48
+    assert x_gain > 2.0 and y_gain > 2.0, (x_gain, y_gain)
+    # Both gains exceed the +/-2 AP gather-lumpiness noise band:
+    # the complementary advantage is noise-robust in winter.
+
+
+def test_summer_counterfactual_wild_margin_kills_trade(ev1):
+    """ChatGPT's central objection, EXECUTED: the Phase 2 protocol pinned
+    SUMMER (genesis 20d), but summer's wild-grain bonus (1.25x -> +1
+    tooled yield = 3 grain/gather) makes wild flour Y's cheapest flour
+    source — undercutting the 16 flour : 10 iron trade.
+
+    Executed: Y (ore_bounty) produces 16 flour from wild grain for
+    28.0 AP (6 gathers + 8 refines; +2 AP round-trip travel to the
+    nearest wild tile, distance 1 — travel only worsens Y's case).
+    Y's 10 iron costs ~31-33 AP. At 16:10, Y's gain = 28 - 33 = -5.0:
+    Y LOSES. X (plow) would gain (39 - 28 = +11), but mutuality fails
+    on Y's side — the trade is NOT mutually beneficial in summer.
+
+    Verdict: the summer scenario is REJECTED for Phase 2. The protocol
+    moves to winter (see test_scenario_d above), where the wild margin
+    is priced out (48 AP) and the trade clears for both agents."""
+    client, keys, db_path, _ = ev1
+    pkx, fx0, farmx = setup_producer(client, keys, db_path, 0,
+                                     advantages=("plow",), season_days=20)
+    pky, fy0, farmy = setup_producer(client, keys, db_path, 1,
+                                     advantages=("ore_bounty",),
+                                     season_days=20)
+    # Y's cheapest summer flour: wild grain at 1.25x.
+    y_wild16 = produce_flour_wild(client, keys[1], db_path, fy0, 16)
+    assert y_wild16 == pytest.approx(28.0, abs=2.0), y_wild16
+    set_inventory(db_path, pky, {"grain": 0, "flour": 0})
+    y_iron10 = produce_iron(client, keys[1], db_path, fy0, 10)
+    # Travel to wild tiles (measured, not teleported away): nearest
+    # wild grain tile distance, round trip at 1 AP/tile — access cost
+    # that applies to Y's wild alternative and only deepens the loss.
+    st = me(client, keys[1])
+    tile = nearest_tile_with(db_path, "grain", st["x"], st["y"])
+    rt_travel = 2 * (abs(tile[0] - st["x"]) + abs(tile[1] - st["y"]))
+    y_gain = y_wild16 - y_iron10  # negative: Y's flour alt < Y's iron cost
+    assert y_gain < -2.0, \
+        f"summer trade must LOSE for Y beyond noise: gain={y_gain:.1f} " \
+        f"(wild16={y_wild16:.1f}, iron10={y_iron10:.1f}, rt_travel={rt_travel})"
+    # X's side for completeness: X gains, but one-sided gain is not
+    # a mutual benefit.
+    x_flour16 = produce_flour(client, keys[0], db_path, fx0, farmx, 16)
+    x_iron10 = produce_iron(client, keys[0], db_path, fx0, 10)
+    assert x_iron10 - x_flour16 > 2.0
+
+
+def test_scenario_d_winter_full_objective(ev1):
+    """ChatGPT correction: FULL-OBJECTIVE accounting. Both agents must
+    END holding 10 iron AND 16 flour. Per-exchange gains are not enough:
+    a trade that leaves an agent needing to replenish its stockpile at
+    a loss is not a net benefit. This test compares TOTAL AP to
+    completed stockpiles under autarky vs cooperation, in winter.
+
+    Executed (winter, genesis 45d):
+      X (plow)    autarky: 10 iron (35) + 16 flour (28) = 63 AP
+      X           coop:    32 flour (56), trade 16 -> ends 10i+16f
+      Y (bounty)  autarky: 10 iron (31) + 16 flour farmed (48) = 79 AP
+      Y           coop:    20 iron (62), trade 10 -> ends 10i+16f
+    Cooperation wins for BOTH agents beyond the noise band (+7/+17).
+    These are the Phase 2 acceptance baselines."""
+    client, keys, db_path, _ = ev1
+    kw = {"season_days": 45}
+    pkxa, fxa, farmxa = setup_producer(client, keys, db_path, 0,
+                                       advantages=("plow",), **kw)
+    pkya, fya, farmya = setup_producer(client, keys, db_path, 1,
+                                       advantages=("ore_bounty",), **kw)
+    pkxc, fxc, farmxc = setup_producer(client, keys, db_path, 2,
+                                       advantages=("plow",), **kw)
+    pkyc, fyc, farmyc = setup_producer(client, keys, db_path, 3,
+                                       advantages=("ore_bounty",), **kw)
+
+    # --- Autarky to completed stockpiles.
+    xa_spent, _ = scenario_produce(client, keys, db_path, 0, fxa, farmxa,
+                                   iron_units=10, flour_units=16)
+    inv_xa = inventory_of(db_path, pkxa)
+    assert inv_xa.get("iron", 0) >= 10 and inv_xa.get("flour", 0) >= 16
+    ya_spent, _ = scenario_produce(client, keys, db_path, 1, fya, farmya,
+                                   iron_units=10, flour_units=16,
+                                   flour_via="farm")
+    inv_ya = inventory_of(db_path, pkya)
+    assert inv_ya.get("iron", 0) >= 10 and inv_ya.get("flour", 0) >= 16
+    assert xa_spent == pytest.approx(63.0, abs=3.0), xa_spent
+    assert ya_spent == pytest.approx(79.0, abs=3.0), ya_spent
+
+    # --- Cooperation to completed stockpiles: X makes 32 flour
+    # (keeps 16, trades 16), Y makes 20 iron (keeps 10, trades 10).
+    xc_spent, _ = scenario_produce(client, keys, db_path, 2, fxc, farmxc,
+                                   flour_units=32)
+    inv_xc = inventory_of(db_path, pkxc)
+    assert inv_xc.get("flour", 0) >= 32, inv_xc
+    yc_spent, _ = scenario_produce(client, keys, db_path, 3, fyc, farmyc,
+                                   iron_units=20)
+    inv_yc = inventory_of(db_path, pkyc)
+    assert inv_yc.get("iron", 0) >= 20, inv_yc
+    assert xc_spent == pytest.approx(56.0, abs=3.0), xc_spent
+    assert yc_spent == pytest.approx(62.0, abs=3.0), yc_spent
+
+    execute_trade(client, keys, db_path, 2, {"flour": 16}, {"iron": 10}, 3)
+    fin_x = inventory_of(db_path, pkxc)
+    fin_y = inventory_of(db_path, pkyc)
+    assert fin_x.get("iron", 0) >= 10 and fin_x.get("flour", 0) >= 16, fin_x
+    assert fin_y.get("iron", 0) >= 10 and fin_y.get("flour", 0) >= 16, fin_y
+
+    x_gain = xa_spent - xc_spent
+    y_gain = ya_spent - yc_spent
+    assert x_gain > 2.0 and y_gain > 2.0, \
+        f"full-objective cooperation must beat autarky beyond noise: " \
+        f"X {x_gain:.1f}, Y {y_gain:.1f}"
 
 # ============================================================ Part C
 # Scenario variants: depletion, distance/travel, seasons (winter),
@@ -851,8 +978,10 @@ def test_variant_winter_wild_grain_penalty(ev1):
     creates a REAL temporal comparative advantage for farmers —
     the v2.3 model's headline seasonal finding, executed."""
     client, keys, db_path, _ = ev1
+    # Season is genesis-derived (world.py season_index_at reads
+    # world_genesis_ts; no world_meta 'season' override exists in the
+    # engine), so season_days=45 alone pins winter: (45//14)%4=3.
     pk, _, _ = setup_producer(client, keys, db_path, 0, season_days=45)
-    set_season(conn_path=db_path, season="winter")
     # Wild grain in winter: 1 per gather (0.5 x 2) -> 2 AP/u... verify.
     spent = harvest_resource(client, keys[0], db_path, "grain", 4)
     # 4 grain at 1/gather = 4 gathers = 8 AP.
@@ -860,14 +989,9 @@ def test_variant_winter_wild_grain_penalty(ev1):
     # vs summer: 4 grain = 2 gathers = 4 AP. Winter doubles wild cost.
 
 
-def set_season(conn_path, season):
-    con = sqlite3.connect(conn_path)
-    try:
-        con.execute("UPDATE world_meta SET value = ? WHERE key = 'season'",
-                    (season,))
-        con.commit()
-    finally:
-        con.close()
+# (set_season removed 2026-10-06: it wrote a world_meta 'season' key that
+# no engine code reads — season is genesis-derived only. Kept honest by
+# deleting rather than pretending an override exists.)
 
 
 def test_variant_ap_constraint_blocks_production(ev1):

@@ -8,7 +8,7 @@ it can be reviewed (ChatGPT independent evaluation), reproduced, and
 
 **Date:** 2026-10-06
 **Branch:** `review/economic-infrastructure-spec`
-**Depends on:** Phase 1 (`VALIDATION_REPORT.md`, 17/17 integration tests,
+**Depends on:** Phase 1 (`VALIDATION_REPORT.md`, 19/19 integration tests,
 44/44 harness checks). Phase 2 tests the one scenario Phase 1 proved
 noise-robust.
 
@@ -16,8 +16,17 @@ noise-robust.
 
 Phase 1 proved, by executing the real engine, that a mutually
 beneficial trade EXISTS for complementary advantages (X with plow, Y
-with ore_bounty: executed gains +9/+17 AP on 16 flour : 10 iron).
-Phase 1 did not test whether any agent would ever FIND it.
+with ore_bounty: executed gains +7/+17 AP on 16 flour : 10 iron **in
+winter**). Phase 1 did not test whether any agent would ever FIND it.
+
+> Season note (ChatGPT correction, adopted and executed): the protocol
+> first pinned summer, but the summer counterfactual
+> (`test_summer_counterfactual_wild_margin_kills_trade`) proved
+> summer's wild-grain bonus lets the iron specialist produce 16 flour
+> for 28 AP — cheaper than its ~31 AP iron cost — so the 16:10 trade
+> LOSES for Y (-5.0 AP) and is not mutually beneficial in summer.
+> **Phase 2 runs in winter**, where the wild-grain penalty prices the
+> wild margin out (48 AP) and the trade clears for both agents.
 
 The milestone question (adopted): **when two agents can make each other
 better off, will they recognize it, trust each other, and act?**
@@ -45,7 +54,7 @@ Two **experimenter-controlled** agents. "Experimenter-controlled" means:
 
 - Endowments, objectives, and briefs are assigned by the experimenters
   (Mini), not chosen by the agents.
-- Runtime is bounded (§3.5); the agents are spun up for the experiment
+- Runtime is bounded (§3.4, §7); the agents are spun up for the experiment
   and retired after.
 - They are NOT presented — in any log, report, or public surface — as
   independent residents. All records carry the `exp-` prefix and an
@@ -64,26 +73,37 @@ independent agents do with it.
 Both agents: registered citizens, spawned, AP cap 100, granted
 `crude_axe` / `crude_pick` / `crude_sickle` (300 durability), one owned
 furnace + one owned farm (built via the standard setup), tithes kept
-up, summer season pinned (genesis 20 days prior — deterministic
-yields).
+up, **winter season pinned** (genesis 45 days prior: (45//14)%4=3 ->
+winter — deterministic yields; the 6h run cannot cross a season
+boundary).
 
 | | Agent A (`exp-miller`) | Agent B (`exp-smith`) |
 |---|---|---|
 | Advantage tool | `plow` (granted) | `ore_bounty` (granted) |
 | Objective | Stockpile **10 iron and 16 flour** | Stockpile **10 iron and 16 flour** |
-| Comparative edge | Flour at 1.75 AP/u | Iron at ~3.1 AP/u marginal |
+| Comparative edge | Flour at 1.75 AP/u (28 AP / 16) | Iron at ~3.1 AP/u marginal |
+| Winter autarky (executed) | 63 AP (35 iron + 28 flour) | 79 AP (31 iron + 48 flour) |
+| Winter cooperation (executed) | 56 AP (32 flour, trade 16) | 62 AP (20 iron, trade 10) |
 
 Objectives are **neutral and independently achievable**: either agent
-can reach its stockpile alone by autarky (A: 37 AP iron + 28 AP flour;
-B: 31 AP iron + 48 AP flour). Nothing in the objective mentions trade,
-the other agent, or cooperation. The objectives are identical so that
-neither brief leaks which good the agent "should" specialize in.
+can reach its stockpile alone by autarky (see table). Nothing in the
+objective mentions trade, the other agent, or cooperation. The
+objectives are identical so that neither brief leaks which good the
+agent "should" specialize in.
 
-Why this scenario: it is the ONLY Phase 1 scenario where executed
-mutual gains (+9/+17 AP) robustly exceed the ±2 AP lumpiness noise
-band — signal survives agent suboptimality. Narrow ore-only
-advantages are excluded: Phase 1 retest proved them noise-dominated
-or negative.
+Why this scenario, and why winter: it is the ONLY Phase 1 scenario
+where executed mutual gains robustly exceed the noise band — and only
+in winter. Summer's wild-grain bonus (1.25x) lets B produce 16 flour
+from wild grain for 28 AP < 31 AP iron cost, so the 16:10 trade loses
+for B (-5.0 AP executed); summer is REJECTED for Phase 2
+(`test_summer_counterfactual_wild_margin_kills_trade`). Winter's
+wild-grain penalty (0.50x -> -1 yield, min 1) prices wild flour at
+48 AP — dominated by B's farmed flour (48 AP) — restoring the
+comparative advantage. Full-objective accounting (both agents END
+holding 10 iron + 16 flour): cooperation beats autarky by +7.0 AP for
+A and +17.0 AP for B (`test_scenario_d_winter_full_objective`). Narrow
+ore-only advantages are excluded: Phase 1 retest proved them
+noise-dominated or negative.
 
 ### 3.3 Briefs
 
@@ -115,7 +135,8 @@ a new pre-registered variant.
 ### 3.4 Procedure (reproducible)
 
 1. Fresh temporary database (`AC_DB_PATH` temp; never production).
-2. Pin genesis (summer), spawn both agents, apply endowments per §3.2.
+2. Pin genesis (winter: 45 days prior), spawn both agents, apply
+   endowments per §3.2.
 3. Commit brief texts + hashes to the experiment log.
 4. Start the run clock. Agents act through the standard signed-action
    loop (same client any resident would use). No experimenter input
@@ -130,8 +151,8 @@ a new pre-registered variant.
 
 | Category | Recorded as |
 |---|---|
-| Discovery | First trace in which the agent's reasoning explicitly compares its autarky cost against an alternative (trade or specialization) — timestamped, quoted |
-| Evaluation | Any cost/reward calculation the agent performs (AP estimates, quantity math) — correct or not |
+| Discovery | First trace in which the agent's STATED rationale (the reasoning field it emits with each action, §7) explicitly compares its autarky cost against an alternative (trade or specialization) — timestamped, quoted |
+| Evaluation | Any cost/reward calculation in the agent's stated rationale (AP estimates, quantity math) — correct or not |
 | Communication | Every message the agent sends naming the other agent, an offer, or a proposed exchange |
 | Negotiation | Every trade offer created/cancelled, every accept attempt (success or fail), every counter-proposal |
 | Completion | Every filled trade: ledger row + inventory deltas verified |
@@ -171,33 +192,70 @@ basis, does NOT count.
 
 A trade offer accepted via `POST /trade/offers/{id}/accept` returning
 200, with a `trade_ledger` row and verified inventory transfer on both
-sides. A completed exchange is **mutually beneficial** iff each
-agent's realized AP cost for its received good is below its Phase 1
-measured autarky baseline (A: iron 37.0, flour-plow 28.0; B: iron
-31.0, flour-noplow 48.0 / wild 32.0).
+sides.
 
-### 4.3 Outcome trichotomy (pilot-scale H5)
+**Mutual benefit is judged on full objectives, not per-exchange
+(ChatGPT correction, adopted).** Both agents must END holding 10 iron
+AND 16 flour. A completed exchange is **mutually beneficial** iff each
+agent's TOTAL realized AP cost to its completed stockpile is below its
+winter autarky baseline:
 
-Phase 2 is a 2-agent pilot informing the H5 experimental methodology —
-it is not the full H5 test (12 weeks, ≥10 Track-A agents, §10.2). The
-trichotomy below operationalizes H5's support/reject/inconclusive
-structure at pilot scale, with the activity threshold pre-registered
-so the outcome cannot be re-interpreted after the fact:
+| Agent | Winter autarky baseline (executed) | Cooperation cost (executed) |
+|---|---|---|
+| A (`exp-miller`) | 63 AP (35 iron + 28 flour) | 56 AP (32 flour, trade 16 away) |
+| B (`exp-smith`) | 79 AP (31 iron + 48 flour) | 62 AP (20 iron, trade 10 away) |
 
-- **SUPPORT** (null: machinery insufficient — agents don't find trade
-  worthwhile): both agents record ≥50 signed actions each (economically
-  active) AND zero completed exchanges by run end. A valid, publishable
-  outcome: it localizes the failure via the §3.5 records (did they fail
-  at discovery, evaluation, trust, or coordination?).
-- **REJECT** (agents do find trade worthwhile): ≥1 completed
-  mutually-beneficial exchange (§4.2) within the run window.
-- **INCONCLUSIVE**: either agent records <50 signed actions (too
-  inactive to distinguish weak incentives from absent effort), OR a
-  technical failure voids the run per §3.6, OR the window expires with
-  only ambiguous partial signals (e.g. discovery without completion).
-  Inconclusive is about *adequacy of the run*, never a hedge on the
-  outcome — a fully active run with zero exchanges is SUPPORT, not
-  inconclusive.
+A trade that leaves an agent needing to replenish its stockpile at a
+loss is NOT a net benefit, even if the single exchange looked
+profitable. (Winter wild-grain flour = 48 AP — dominated by B's farmed
+48 AP — so the wild margin is not the binding alternative in winter;
+in summer it would be, which is why summer was rejected.)
+
+### 4.3 Pilot outcomes: per-agent trace classification (NOT population verdicts)
+
+**Scope correction (ChatGPT review, adopted):** two experimenter-
+controlled agents over six hours CANNOT support or reject H5 at
+population level. A zero-trade run could reflect poor discovery,
+limited reasoning, failed negotiation, insufficient time, or genuinely
+insufficient incentives — the pilot cannot distinguish these at the
+economy level. The pilot therefore does NOT use H5's
+support/reject/inconclusive trichotomy. It classifies each agent's
+recorded trace separately, using only API-visible evidence (§3.5, §7).
+These classified traces become EVIDENCE for the future real H5
+experiment (≥10 Track-A agents, 12 weeks, §10.2 of the spec), which is
+where population-level conclusions belong.
+
+Per-agent classifications (each requires the cited evidence in the
+recorded trace — never inferred by the experimenters):
+
+- **Discovery:** the agent's trace shows an explicit autarky-vs-
+  alternative cost comparison (numbers may be approximate but must be
+  directionally correct), OR it initiates trade-directed communication
+  / creates an offer exploiting its own comparative advantage (offers
+  the good it produces cheaply, asks for the good it produces dearly).
+  Mere production of both goods, or mentioning trade without a cost
+  basis, does NOT count.
+- **Evaluation:** the agent performs cost/reward math (AP estimates,
+  quantity calculations) — correct or not. Mis-evaluation is recorded
+  as its own finding, not folded into discovery.
+- **Negotiation:** the agent sends messages naming the other agent, an
+  offer, or a proposed exchange; creates/cancels offers; attempts
+  accepts (success or fail); makes counter-proposals.
+- **Execution:** a completed exchange per §4.2 (200 accept, ledger row,
+  verified inventory transfer on both sides, full-objective mutual
+  benefit per the winter baselines).
+- **Rational refusal:** the agent evaluates the opportunity WITH
+  numbers and correctly concludes it is not beneficial (e.g. computes
+  that its autarky cost beats the offered terms). This is a distinct,
+  publishable outcome — it means the agent reasoned correctly about a
+  bad (or misperceived) trade, not that it failed to discover.
+- **Technical failure:** crash-loop, repeated 4xx without adaptation,
+  AP deadlock with no recovery attempt, objective rendered infeasible
+  by mechanics. Distinguished from economic failure: the agent never
+  got to make an economic decision.
+
+The pilot's deliverable is the classified trace pair plus the
+recorded costs — not a verdict on Emerovia's economic incentives.
 
 ## 5. Explicitly out of scope
 
@@ -219,3 +277,48 @@ so the outcome cannot be re-interpreted after the fact:
    against §4.3.
 
 No step 4 without step 3. There is no standing authorization to run.
+
+## 7. Operational specification
+
+(ChatGPT correction, adopted: the protocol must specify runtimes,
+models, cadence, recording, and budget before any launch decision.)
+
+- **Runtime:** a scripted agentic harness (Python) speaking the
+  standard signed-action scheme — the same request-signing the
+  resident client uses (ed25519, `X-Agent-Pubkey` / `X-Timestamp` /
+  `X-Signature` headers). Each tick: GET world state (`/world/me`,
+  `/world/info`, visible tiles, open trade offers, messages) → prompt
+  the model → parse exactly ONE action → sign and POST → log the
+  result. The harness runs against the temp-DB world from §3.4. No
+  experimenter input after start except §3.6 technical intervention.
+- **Model:** pinned at launch. The reference class is the
+  experimenter's current agent runtime model (the same family driving
+  the resident heartbeat); the EXACT model version is recorded in the
+  experiment log before start, alongside the brief SHA-256 hashes and
+  harness version. If the model changes, the run is a new
+  pre-registered variant.
+- **Action cadence:** one model tick every 2 minutes. The model may
+  emit `wait` actions (e.g. while crops grow — farm cycles are 2h
+  real-time; A's cooperation plan needs two cycles ≈ 4h, which fits
+  the window); the harness sleeps through waits WITHOUT model calls,
+  waking every 15 minutes to re-check state. Hard caps: **150 signed
+  actions per agent**, **6 wall-clock hours**, whichever comes first.
+- **Recording method — API-visible traces ONLY.** Per tick the log
+  records: timestamp, state snapshot, model input/output token counts,
+  the parsed action, HTTP status, and AP/inventory deltas. Plus: every
+  trade offer and ledger row, every chat message, and full DB
+  snapshots at run start/end. The harness prompts the model to include
+  a brief reasoning field with each action; that field is recorded as
+  the agent's STATED rationale. We do NOT assume access to private
+  chain-of-thought: anything outside the stated field and API-visible
+  state is not evidence for §4.3 classification.
+- **Inference budget and cost cap.** Per-tick input capped at 6,000
+  tokens (state summarization + truncation), output ≤ 500 tokens. Max
+  400 model calls total (2 agents × 200 — covers 150 actions plus
+  deliberation and wake-checks) → **≤ 2.4M input + ≤ 200k output
+  tokens**. Expected realistic run: ~120 calls/agent × ~4k tokens ≈
+  **~1M tokens total**. The DOLLAR cap is computed at launch from the
+  pinned model's published rates and **pre-registered in the
+  experiment log BEFORE start**; the harness halts the run if the cap
+  is hit, logged as a technical stop (§3.6) — never as an economic
+  finding. No inference spend occurs without the pre-registered cap.
