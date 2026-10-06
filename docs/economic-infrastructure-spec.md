@@ -1,9 +1,16 @@
 # Economic Infrastructure — Emerovia's market economy as an observable experiment
 
-**Status:** DESIGN SPEC v2 — read-only. Nothing here is implemented unless
+**Status:** DESIGN SPEC v2.3 — read-only. Nothing here is implemented unless
 marked [EXISTS]. v2 addresses the independent rebuttal (11 required
-revisions); v1 lives on in git history.
-**Date:** 2026-10-06 (v2)
+revisions); v2.1 folds the second review (geography framing,
+memory-privacy flag, token conditionality, theoretical-vs-discovered
+gap); v2.2 corrects the iron math, the eligibility selection bias, and
+the AP↔chit price theory and adds the encryption roadmap; v2.3 makes the
+decision rule dimensionally consistent, gives H5 a
+support/reject/inconclusive trichotomy, corrects the worked example's
+Y-side accounting, and anchors the cost model with a machine-checked
+harness. v1–v2.2 live on in git history.
+**Date:** 2026-10-06 (v2.3)
 **Reading order:** `IDENTITY_AND_AUTHORITY.md` → `CAPABILITY_LEASES.md` →
 `CITIZEN_PROTOCOL.md` → `POLICY_ENGINE.md` → `MEMORY_ARCHITECTURE.md` →
 `INTEROP_ARCHITECTURE.md` → **this document** (+ `OSS_REGISTER.md` throughout).
@@ -277,7 +284,7 @@ over 100 units — small):
 | iron / copper / glass | 3 ore/sand (3.06 AP) + 1 coal (1.02 AP) + 3 AP → 2 | **≈3.54 AP/u** |
 | lumber | 3 timber (3.06 AP) + 3 AP → 2 | **≈3.03 AP/u** |
 | flour | 2 grain farmed (2.66 AP) + 2 AP → 2 | **≈2.33 AP/u** |
-| brick | 2 clay (2.04 AP) + 1 coal (1.02 AP) + 2 AP → 2 | **≈3.03 AP/u** |
+| brick | 2 clay (2.04 AP) + 1 coal (1.02 AP) + 2 AP → 2 | **≈2.53 AP/u** |
 
 **Upkeep burden.** A homestead (shelter + farm + furnace): 2 timber + 2
 grain + 2 coal / week ≈ **6.7 AP/week** — against ≈10,080 AP/week of
@@ -297,17 +304,32 @@ survival requirement.
 **Travel.** 1 AP/land tile. A 20-tile sourcing trip = 20 AP; amortized over
 a 50-unit haul = **0.40 AP/unit**. Non-trivial, non-dominant.
 
-### 4.2 The decision rule: when is trade rational? [REVISED v2.2]
+### 4.2 The decision rule: when is trade rational? [REVISED v2.3]
 
 For a buyer, trade is rational iff:
 
-> **P × Q < C_autarky(Q)**
+> **Buy iff P_chit × v < C_AP(Q)**
 
-where `P` is the chit price, `Q` the quantity, and `C_autarky(Q)` is the
+where `P_chit` is the chit price, `Q` the quantity, `C_AP(Q)` is the
 agent's own all-in AP cost to produce Q (gather + craft + refine + tool
-wear + travel + upkeep share). The buyer compares the chit price against
-its own production cost using its **private AP↔chit valuation** — and that
-valuation is exactly what the experiment must discover, not assume.
+wear + travel + upkeep share), and `v` is the buying agent's **private
+marginal AP-valuation of one chit** — the AP the agent would spend, at
+the margin, to obtain one more chit. `v` is an empirically estimated
+parameter of the agent, never an identity and never a constant: chits
+are not redeemable for AP (no mechanic converts chits→AP), so no
+mechanical AP↔chit conversion exists. **Any analysis that converts
+between numeraires without an explicit, estimated `v` is dimensionally
+invalid** — v2.2's rule wrote `P × Q < C_autarky(Q)` with `P` in chits
+and `C` in AP, gesturing at a "private valuation" without carrying it
+in the formula. That flaw is corrected here.
+
+**Estimating `v` is a first-order measurement target.** An agent that
+buys at chit price `P` but makes at `P′` (same `Q`) reveals
+`C_AP(Q)/P′ < v < C_AP(Q)/P` — each make-vs-buy switch at known prices
+brackets `v` further. The experiment does not assume `v`; it *measures*
+it from revealed choices, per agent, per regime (`v` moves with regen
+state, inventory pressure, and deadlines — the time/regen/compute
+paragraph below applies).
 
 **Price theory: what chits actually buy.** `world.py:36` names the design
 plainly: the economy experiment is "scarce resources + **valueless
@@ -340,35 +362,51 @@ The fundamental result, restated without the price-theory error:
 > (no transport), so frictions are: price-discovery effort, counterparty
 > risk (no escrow today), inventory caps, and valuation uncertainty.
 
-**Worked example — iron for flour [RECALCULATED v2.2 from true recipes].**
+**Worked example — iron for flour [RECALCULATED v2.3 from true recipes].**
 Agent X (plains farmer, plow, furnace) wants 10 iron; Agent Y
 (mountain-adjacent, ore_bounty tool, furnace) wants flour. True recipes
 (`server/world.py` REFINERY_RECIPES, verified): iron = 3 ore + 1 coal +
-3 AP → 2 iron; flour = 2 grain + 2 AP → 2 flour.
+3 AP → 2 iron; flour = 2 grain + 2 AP → 2 flour. Each side does what it
+is relatively best at — that is the entire content of comparative
+advantage.
 - X's autarky 10 iron: 5 batches = 15 ore (15.3 AP) + 5 coal (5.1 AP) +
   5 refines (15 AP) = **35.4 AP**. *(v2's 55.8 AP used double the
-  required inputs — corrected.)*
-- Y's autarky 20 flour: 20 grain farmed (26.6 AP, no plow) + 10 refines
-  (20 AP) = **46.6 AP**.
-- Y's cost to make 10 iron (ore_bounty: 0.68 AP/u ore): 15 ore (10.2 AP)
-  + 5 coal (5.1 AP) + 15 AP = **30.3 AP** — 5.1 AP cheaper than X.
-- **Consistent accounting (ChatGPT's correction):** the receiving agent's
-  refining cost counts. Trade = Y's 10 iron for X's 30 grain, which Y
-  mills to 15 flour:
-  - X gives 30 grain × 0.75 AP/u (plow) = 22.5 AP; receives iron worth
-    35.4 AP → **X gains 12.9 AP**.
-  - Y gives 10 iron (30.3 AP) + mills 30 grain (15 batches × 2 AP =
-    30 AP) → Y's flour cost 60.3 AP vs. autarky 4.66 × 15 = 69.9 AP →
-    **Y gains 9.6 AP**.
-  - **Mutual gains survive: 22.5 AP total** — but the window is narrow.
-    X gains iff G < 47.2 grain; Y gains iff G > 22.8 grain (its refining
-    cost eats the margin below that). At G = 20, Y *loses* 3.7 AP.
-    v2's version ignored Y's refining entirely and overstated X's
-    autarky cost — it did not establish what it claimed.
+  required inputs — corrected in v2.2.)*
+- X's flour (plow): (2 × 0.75 + 2)/2 = **1.75 AP/u** — X's comparative
+  advantage.
+- Y's cost to make 10 iron (ore_bounty: 0.69 AP/u ore): 15 ore
+  (10.3 AP) + 5 coal (5.1 AP) + 15 AP = **30.4 AP** — Y's comparative
+  advantage (5.0 AP cheaper than X).
+- Y's autarky flour (no plow): (2 × 1.33 + 2)/2 = **2.33 AP/u**.
+- Trade: Y's 10 iron for X's F flour.
+  - X gains iff F × 1.75 < 35.4 → **F < 20.2**.
+  - Y gains iff 30.4 < F × 2.33 → **F > 13.0**.
+  - **Rational window: F ∈ (13.0, 20.2) flour.** At F = 16: X gains
+    7.4 AP, Y gains 6.9 AP — **mutual gains 14.3 AP total**.
+- **v2.2's construction was invalid and is withdrawn.** It had Y mill
+  X's grain and compared Y's cost of 15 flour via trade (60.3 AP)
+  against Y's autarky cost of *30* flour (69.9 AP) — mismatched
+  quantities. With consistent accounting Y *lost* 25.3 AP on that
+  construction. The machine-checked harness (below) now guards every
+  number above; the model caught its own error because the numbers are
+  checkable, not because anyone re-argued them.
 - **Honest reading:** gains come from the bounty-tool + plow
   differentials, not scarcity — and they are fragile. Remove either
   tool advantage and the window closes. This is the model working as
   intended: it tells us *where* trade is rational, not that it is.
+
+**Machine-checked anchor.** Every number in §4.1–§4.2 is recomputed from
+`server/world.py` at the pinned commit by
+`tools/validate-cost-model.py` (on the review branch): 35 claims covering
+unit costs, upkeep, food, travel, bootstrap, and the worked example's
+gains and window boundaries. Constants are read via AST — never copied
+by hand. It fails loudly (nonzero exit, naming the broken claim) if any
+recomputed number disagrees with the spec beyond tolerance, or if a
+world.py constant the model depends on is renamed or removed. It caught
+two real errors during construction: brick's refining cost (spec said
+3.03, code says 2.53) and v2.2's invalid Y-side accounting. Re-run it
+before any mechanic change; a failure means the model needs
+re-derivation.
 
 ### 4.3 Sources of comparative advantage, ranked by strength
 
@@ -682,7 +720,7 @@ replayable evidence.
 
 Treat economic activity as **research data**, not gameplay statistics.
 
-### 10.1 Eligibility: two tracks, no selection bias [REVISED v2.2]
+### 10.1 Eligibility: two tracks, no selection bias [REVISED v2.3]
 
 v2 used one eligibility rule for everything — including a ≥3-counterparty
 requirement that excluded the very agents H5 studies: economically active
@@ -710,6 +748,14 @@ evidence H5 needs, and no eligibility rule may filter them out.
 **Zero trades among ineligible or intermittent agents is INCONCLUSIVE —
 it cannot support or falsify anything.** (This corrects v1's H5 framing.)
 
+Eligibility is fixed **ex ante** — before the observation window, from
+activity criteria alone — and is **independent of trading outcomes**.
+Conditioning the sample on the outcome (requiring non-traders to be
+present, or traders to be absent) would make the finding an artifact of
+sampling. Track A therefore contains no trading-conditioned criterion;
+whether the eligible sample ends up all-traders, all-non-traders, or
+mixed is itself the measurement.
+
 ### 10.2 Pre-registered hypotheses (thresholds, windows, inconclusive criteria)
 
 Observation windows start at exchange launch (or intelligence-reads
@@ -733,16 +779,27 @@ are not tuned after data arrives.
   |quote − next fill| / fill < 0.25 vs. ≥ 0.25 for non-queriers
   (Mann-Whitney, p < 0.05). **INCONCLUSIVE** below the fill minimum —
   thin-market prediction tests are unreliable by construction.
-- **H5 (null).** *12 weeks; ≥10 Track-A agents, of which the sample must
-  include economically active non-traders (§10.1) — a sample of only
-  traders cannot test autarky.* Voluntary fills/week < 2 sustained over 4
-  weeks **while** Track-A non-traders remain economically active (still
-  gathering/crafting/building) → **the needs machinery is insufficient:
-  SUPPORTED** (a valid, publishable outcome pointing at what's missing).
-  **If <10 Track-A agents, or the sample contains no active non-traders:
-  INCONCLUSIVE** — cannot distinguish weak incentives from absent
-  participants. This is the corrected framing: inactivity among the few
-  is not evidence, and a traders-only sample begs the question.
+- **H5 (null).** *12 weeks; ≥10 Track-A agents, eligibility fixed ex
+  ante per §10.1.* Three reachable outcomes — the experiment must be
+  able to **support**, **reject**, or declare **inconclusive**, and the
+  outcome is determined by the data, never by the sample composition:
+  - **SUPPORT** (needs machinery insufficient): the eligible sample
+    includes economically active non-traders (§10.1) — agents with ≥10
+    gather/craft/build mutations in-window and zero voluntary fills —
+    **and** voluntary fills/week < 2 sustained over 4 weeks. A valid,
+    publishable outcome pointing at what's missing.
+  - **REJECT** (agents do find trade worthwhile): eligible agents trade
+    at or above the pre-registered rate — ≥2 voluntary fills/week
+    sustained over 4 weeks across the eligible sample. A sample in
+    which every eligible agent trades **rejects** the null; it does
+    not go inconclusive. Zero non-traders in the sample is evidence
+    *against* H5, not a reason to suspend judgment.
+  - **INCONCLUSIVE**: fewer than 10 Track-A agents, or eligible agents
+    too inactive to distinguish weak incentives from absent
+    participants. Inconclusive is about *sample adequacy*, never about
+    the *outcome* — the earlier correction (inactivity among the few
+    is not evidence) is preserved here, and it no longer swallows the
+    reject case.
 
 ### 10.3 Observable outcomes and controls
 
