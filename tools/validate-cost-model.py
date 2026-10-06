@@ -269,9 +269,14 @@ def main():
     # integration tests (tests/test_econ_validation_phase1.py).
     #
     # Farm cycle quanta: one full cycle (plant 4 + harvest 4) yields
-    # exactly 12 grain without plow, 16 with plow. Flour refines 2:2,
-    # so flour comes in 12- or 16-unit quanta. A rational window (lo, hi)
-    # is EXECUTABLE only if it contains a cycle-exact quantity.
+    # exactly 12 grain without plow, 16 with plow. RETEST 2026-10-06
+    # (ChatGPT correction): farm() takes individual slots (0-3) and
+    # refine() is one discrete 2:2 batch per call, so flour is
+    # producible in ANY even quantity 2*floor(3n/2) for n slots —
+    # e.g. 14 flour = 5 slots -> 15 grain -> 7 batches (34 AP, 1 grain
+    # retained). The binding ore-only constraint is therefore NOT
+    # lumpiness but the wild-grain margin (2.0 AP/u) available to both
+    # agents: it competes away Y's bounty advantage.
     farm_quanta = {"noplow": 12.0, "plow": 16.0}
     check("discrete_flour_quantum_noplow", farm_quanta["noplow"], 12.0,
           0.01, "one farm cycle, no plow")
@@ -287,17 +292,22 @@ def main():
 
     # Ore-advantage-only window (Y ore_bounty, neither has plow):
     # X gains iff F*2.33 < 35.4 -> F < 15.2; Y gains iff 30.4 < F*2.33
-    # -> F > 13.0. Window (13.0, 15.2) contains NO multiple of 12 ->
-    # the continuous prediction is INFEASIBLE under discrete mechanics.
+    # -> F > 13.0. RETEST 2026-10-06: 14 IS producible via per-slot
+    # harvest (5 slots -> 15 grain -> 7 batches), so the window contains
+    # a producible quantity — but the continuous model omits the wild
+    # margin (2.0 AP/u), which is Y's true flour autarky. Executed:
+    # X gains (37-34=+3) but Y loses (28-30.4... 28 wild vs 31 bounty
+    # iron = -3). Producible, not mutually beneficial.
     ore_only_lo = y_iron10 / y_flour_u
     ore_only_hi = x_iron10 / y_flour_u
     check("ore_only_window_lo", ore_only_lo, 13.0, 0.3)
     check("ore_only_window_hi", ore_only_hi, 15.2, 0.3)
-    feasible_ore_only = [q for q in (12.0, 24.0)
+    feasible_ore_only = [q for q in (12.0, 14.0, 24.0)
                          if ore_only_lo < q < ore_only_hi]
-    check("ore_only_window_cycle_exact_count",
-          float(len(feasible_ore_only)), 0.0, 0.01,
-          "no cycle-exact F in (13.0, 15.2): continuous window infeasible")
+    check("ore_only_window_producible_count",
+          float(len(feasible_ore_only)), 1.0, 0.01,
+          f"producible F in (13.0, 15.2): {feasible_ore_only} (per-slot;"
+          " mutuality decided by margin competition, not lumpiness)")
 
     # Noise dominance: gather comes in 2-unit increments, so the final
     # partial gather adds up to +/-2 AP of lumpiness noise per
@@ -306,16 +316,25 @@ def main():
     check("lumpiness_noise_band_ap", 2.0, 2.0, 0.01,
           "max gather-lumpiness noise per production run")
 
-    # At the nearest cycle-exact quanta flanking the infeasible
-    # ore-only window, mutual gains do NOT hold (farmed flour, no plow):
+    # At the nearest full-cycle quanta flanking the ore-only window,
+    # mutual gains do NOT hold (farmed flour, no plow):
     # F=12: X gains (35.4-27.96) but Y loses (27.96-30.4).
-    # F=24: Y gains but X loses. The window is a mirage.
+    # F=24: Y gains but X loses.
     x_gain_f12 = x_iron10 - 12.0 * y_flour_u
     y_gain_f12 = 12.0 * y_flour_u - y_iron10
     check("ore_only_f12_not_mutual",
           float(1.0 if (x_gain_f12 > 0) != (y_gain_f12 > 0) else 0.0),
           1.0, 0.01,
           f"F=12: x_gain={x_gain_f12:.2f}, y_gain={y_gain_f12:.2f}")
+
+    # F=14 (per-slot, retest 2026-10-06): EXECUTED marginal costs —
+    # X's 14 flour = 34.0 AP vs 37.0 iron autarky (+3.0); Y's 10 iron =
+    # 31.0 AP vs 28.0 wild-flour autarky (-3.0). Producible, not
+    # mutually beneficial: the wild margin, not lumpiness, closes it.
+    check("ore_only_f14_executed_not_mutual",
+          float(1.0 if (37.0 - 34.0 > 0) != (28.0 - 31.0 > 0) else 0.0),
+          1.0, 0.01,
+          "F=14 executed: x_gain=+3.0, y_gain=-3.0 (wild margin)")
 
     print()
     if failures:

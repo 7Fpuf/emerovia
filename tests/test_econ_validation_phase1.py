@@ -371,6 +371,38 @@ def produce_flour(client, key, db_path, furnace_xy, farm_id, units):
     return ap_cost_of(client, key, db_path, run)
 
 
+def produce_flour_partial(client, key, db_path, furnace_xy, farm_id, slots):
+    """Produce flour via PER-SLOT plant/harvest (ChatGPT correction,
+    retested 2026-10-06). The engine supports individual slots
+    (world.py farm() takes slot 0-3; slots are independent state
+    machines) and partial refining (one 2:2 batch per call); surplus
+    grain is retained in inventory. Plants/harvests exactly `slots`
+    slots across as many cycles as needed, then refines
+    floor(grain/2) batches. Returns AP spent."""
+    pk = pubkey_hex(key)
+
+    def run():
+        planted = 0
+        while planted < slots:
+            batch = min(4, slots - planted)
+            for slot in range(batch):
+                signed_request(client, key, "POST", "/world/farm",
+                               {"structure_id": farm_id, "action": "plant",
+                                "slot": slot})
+            ready_farm(db_path, farm_id)
+            for slot in range(batch):
+                signed_request(client, key, "POST", "/world/farm",
+                               {"structure_id": farm_id, "action": "harvest",
+                                "slot": slot})
+            planted += batch
+        grain = inventory_of(db_path, pk).get("grain", 0)
+        teleport(db_path, pk, *furnace_xy)
+        for _ in range(grain // 2):
+            signed_request(client, key, "POST", "/world/refine",
+                           {"item": "flour"})
+    return ap_cost_of(client, key, db_path, run)
+
+
 def produce_flour_wild(client, key, db_path, furnace_xy, units):
     """Produce `units` flour via WILD grain (depleting, 1.0 AP/u gather).
     Returns AP spent. The marginal flour source for small quantities —
@@ -526,6 +558,9 @@ def test_bootstrap_cost_executed(ev1):
 #   FLOUR12       = 28.0 AP  (12 flour, no plow: exact 1 cycle + 6 refines)
 #   FLOUR16_WILD  = 32.0 AP  (16 flour, wild grain: 8 gathers + 8 refines)
 #   FLOUR16_NOPLOW= 48.0 AP  (16 flour, no plow: 2 cycles, 8 grain surplus)
+#   FLOUR14_PARTIAL = 34.0 AP (14 flour, no plow: 5 slots over 2 cycles ->
+#                   15 grain -> 7 refines, 1 grain retained; per-slot
+#                   mechanic, retested 2026-10-06)
 
 def scenario_produce(client, keys, db_path, idx, furnace_xy, farm_id,
                      iron_units=0, flour_units=0, flour_via="farm"):
@@ -594,44 +629,81 @@ def test_scenario_b_farming_advantage(ev1):
     # because farm lumpiness raises Y's flour autarky to 48.
 
 
-def test_scenario_c_ore_advantage_narrow_window(ev1):
-    """Y has ore_bounty. Continuous model: window F in (13.0, 15.2) —
-    INFEASIBLE under discrete farm cycles (no cycle-exact F inside).
-    Feasible margin is wild grain: X makes 16 flour wild (32 AP),
-    Y makes 10 iron (31 AP). Narrow but positive: X +5.0, Y +1.0.
+def test_scenario_c_partial_harvest_14_flour(ev1):
+    """ChatGPT's correction, VERIFIED in code: farm() supports per-slot
+    plant/harvest (slot 0-3, independent state machines) and refine()
+    is one discrete 2:2 batch per call, so 14 flour IS producible —
+    the Phase 1 helper's full-cycle restriction was artificial.
 
-    FINDING: the ore advantage is partially competed away by the
-    wild-flour margin available to both. Depletion bounds this."""
+    5 slots across 2 cycles -> 15 grain -> 7 refines -> 14 flour,
+    1 grain retained. Executed: 5x2 plant + 5x2 harvest + 7x2 refine
+    = 34 AP (2.43 AP/u)."""
     client, keys, db_path, _ = ev1
-    feasible = [f for f in (12, 24)
-                if 31.0 < f * 2.33 and f * 2.33 < 37.0]
-    assert feasible == [], "continuous window has no cycle-exact point"
+    pk, furnace_xy, farm_id = setup_producer(client, keys, db_path, 0,
+                                             season_days=28)
+    set_inventory(db_path, pk, {"grain": 0})
+    spent = produce_flour_partial(client, keys[0], db_path, furnace_xy,
+                                  farm_id, slots=5)
+    inv = inventory_of(db_path, pk)
+    assert inv.get("flour", 0) == 14, inv
+    assert inv.get("grain", 0) == 1, inv  # surplus retained, not voided
+    assert spent == pytest.approx(34.0, abs=1.0), f"spent={spent}"
 
+
+def test_scenario_c_ore_advantage_narrow_window(ev1):
+    """Y has ore_bounty. RETESTED per ChatGPT's correction (2026-10-06).
+
+    14 flour is producible via partial harvests (34 AP, test above), so
+    the old "no feasible quantity in the window" verdict is replaced.
+    But producible != mutually beneficial: Y's cheapest flour autarky
+    is the WILD margin (2.0 AP/u in autumn: 7 gathers + 7 refines =
+    28 AP for 14 flour), so at 14 flour : 10 iron Y's gain is
+    28 - 31 = -3.0 while X's is 37 - 34 = +3.0. The trade executes but
+    Y loses — NOT a mutual gain.
+
+    REFINED VERDICT: ChatGPT was right about the mechanic, but the
+    window stays closed — the binding constraint is the wild-margin
+    competition available to BOTH agents, not farm lumpiness alone.
+    The continuous model (which omits the wild margin) predicts
+    mutuality at F=14; executed reality does not.
+
+    Fallback (unchanged): 16 flour wild (32 AP) for 10 iron (31 AP):
+    X +5.0, Y +1.0 — Y's gain stays inside the +/-2 AP gather-lumpiness
+    noise band. The narrow ore advantage is NOISE-DOMINATED: the model
+    cannot reliably predict the sign of Y's gain."""
+    client, keys, db_path, _ = ev1
     pkx, fx0, farmx = setup_producer(client, keys, db_path, 0,
                                      season_days=28)
     pky, fy0, farmy = setup_producer(client, keys, db_path, 1,
                                      advantages=("ore_bounty",),
                                      season_days=28)
-    x_spent, _ = scenario_produce(client, keys, db_path, 0, fx0, farmx,
-                                  flour_units=16, flour_via="wild")
-    y_spent, _ = scenario_produce(client, keys, db_path, 1, fy0, farmy,
-                                  iron_units=10)
-    execute_trade(client, keys, db_path, 0, {"flour": 16}, {"iron": 10}, 1)
+    # --- Retest 1: 14 flour (per-slot) : 10 iron. Producible, but Y's
+    # wild autarky (28 AP) undercuts Y's 31 AP iron cost.
+    set_inventory(db_path, pkx, {"grain": 0})
+    x14_spent = produce_flour_partial(client, keys[0], db_path, fx0,
+                                      farmx, slots=5)
+    y10_spent = produce_iron(client, keys[1], db_path, fy0, 10)
+    assert x14_spent == pytest.approx(34.0, abs=1.0), x14_spent
+    assert y10_spent == pytest.approx(31.0, abs=2.0), y10_spent
+    execute_trade(client, keys, db_path, 0, {"flour": 14}, {"iron": 10}, 1)
     inv_x = inventory_of(db_path, pkx)
-    inv_y = inventory_of(db_path, pky)
     assert inv_x.get("iron", 0) >= 10
-    assert inv_y.get("flour", 0) >= 16
+    x_gain14 = 37.0 - x14_spent   # +3.0
+    y_gain14 = 28.0 - y10_spent   # -3.0: wild margin beats the bounty
+    assert x_gain14 > 0, x_gain14
+    assert y_gain14 < 0, y_gain14
 
-    x_gain = 37.0 - x_spent  # ~5.0
-    y_gain = 32.0 - y_spent  # predicted ~+1.0; see below
-    # MODEL FAILURE (asserted): Y's predicted +1.0 gain is smaller than
-    # gather lumpiness noise (+/-2 AP from partial final gathers).
-    # The narrow ore advantage is NOISE-DOMINATED under discrete
-    # mechanics — the model cannot reliably predict the sign of Y's
-    # gain. This is a Phase 1 finding, not a test bug.
-    assert -2.0 <= y_gain <= 2.0, \
-        f"Y's gain should be noise-dominated, got {y_gain}"
-    assert x_gain > 0, x_gain
+    # --- Retest 2: wild-margin 16:10 (unchanged finding).
+    x16_spent = produce_flour_wild(client, keys[0], db_path, fx0, 16)
+    y10b_spent = produce_iron(client, keys[1], db_path, fy0, 10)
+    execute_trade(client, keys, db_path, 0, {"flour": 16}, {"iron": 10}, 1)
+    inv_y = inventory_of(db_path, pky)
+    assert inv_y.get("flour", 0) >= 16
+    x_gain16 = 37.0 - x16_spent  # +5.0
+    y_gain16 = 32.0 - y10b_spent  # ~+1.0: noise-dominated
+    assert x_gain16 > 0, x_gain16
+    assert -2.0 <= y_gain16 <= 2.0, \
+        f"Y's gain should be noise-dominated, got {y_gain16}"
 
 
 def test_scenario_d_complementary_advantages(ev1):
@@ -697,19 +769,55 @@ def walk(client, key, direction, steps):
 
 
 def test_variant_travel_cost_bound(ev1):
-    """Real travel is 1 AP/tile (land). A 20-tile delivery costs 20 AP —
-    enough to erase the +1.0 narrow gain in scenario C. Distance is a
-    hard bound on cooperation: trade only pays if
-    gain > 2 x distance x move_cost."""
+    """Travel is 1 AP/tile (land), 2 AP (mountain): an ACQUISITION cost
+    (reaching resource tiles, standing on your furnace), NEVER a delivery
+    cost. The trade API settles globally — accept() swaps inventories in
+    one DB transaction with no position check — so counterparties never
+    travel to each other and distance cannot erode trade gains. (The
+    earlier 'delivery erases the +1.0 gain / gain > 2 x distance x
+    move_cost' framing was a v2.1 delivery-vs-access regression and is
+    removed.)
+
+    (a) 10 real tiles on foot: 10-20 AP charged against PRODUCTION.
+    (b) A profitable trade executed between agents ~tens of tiles apart
+    fills with gains identical to the co-located baseline."""
     client, keys, db_path, _ = ev1
-    pk, _, _ = setup_producer(client, keys, db_path, 0)
-    set_ap(db_path, pk, 100)
+    pkx, fx0, farmx = setup_producer(client, keys, db_path, 0,
+                                     advantages=("plow",))
+    pky, fy0, farmy = setup_producer(client, keys, db_path, 1,
+                                     advantages=("ore_bounty",))
+    # (a) acquisition travel, measured on foot.
+    set_ap(db_path, pkx, 100)
     spent, moved = walk(client, keys[0], "E", 10)
-    # Each land move costs 1 AP; mountain 2. All moves cost >= 1.
     assert moved == 10, f"moved={moved}"
     assert 10 <= spent <= 20, f"spent={spent}"
-    # A 20-AP round trip over 10 tiles erases narrow gains: distance
-    # bounds cooperation (gain must exceed 2 x distance x move_cost).
+    # (b) separate the traders: farthest land tile from X.
+    stx = me(client, keys[0])
+    conn = db(db_path)
+    try:
+        far = conn.execute(
+            "SELECT x, y FROM world_tiles WHERE terrain != 'ocean'"
+            " ORDER BY (ABS(x - ?) + ABS(y - ?)) DESC LIMIT 1",
+            (stx["x"], stx["y"])).fetchone()
+        assert far is not None
+    finally:
+        conn.close()
+    teleport(db_path, pky, far["x"], far["y"])
+    sty = me(client, keys[1])
+    dist = abs(stx["x"] - sty["x"]) + abs(stx["y"] - sty["y"])
+    assert dist >= 20, f"dist={dist}"
+    # Trade settles via the API with no travel by either party.
+    x_spent, _ = scenario_produce(client, keys, db_path, 0, fx0, farmx,
+                                  flour_units=16)
+    y_spent, _ = scenario_produce(client, keys, db_path, 1, fy0, farmy,
+                                  iron_units=10)
+    oid, ledger = execute_trade(client, keys, db_path, 0,
+                                {"flour": 16}, {"iron": 10}, 1)
+    assert ledger is not None
+    # Gains match the co-located scenario-D baseline: distance is not a
+    # term in trade profitability.
+    assert 37.0 - x_spent == pytest.approx(9.0, abs=1.0)
+    assert 48.0 - y_spent == pytest.approx(17.0, abs=2.0)
 
 
 def test_variant_depletion_forces_relocation(ev1):
@@ -813,7 +921,9 @@ def test_variant_inventory_cap_blocks_bulk_trade(ev1):
 
 def test_variant_offer_cannot_be_accepted_twice(ev1):
     """Double-accept: after accept, the offer is filled. A second accept
-    must fail. (Execute_trade covers the happy path; this is the edge.)"""
+    must fail with HTTP 409 and detail 'offer is filled' — asserted
+    explicitly on the status code and body, not via a broad
+    AssertionError catch (ChatGPT correction 2026-10-06)."""
     client, keys, db_path, _ = ev1
     pk0, _, _ = setup_producer(client, keys, db_path, 0)
     pk1, _, _ = setup_producer(client, keys, db_path, 1)
@@ -825,23 +935,19 @@ def test_variant_offer_cannot_be_accepted_twice(ev1):
     oid = offer["offer_id"]
     signed_request(client, keys[1], "POST",
                    f"/trade/offers/{oid}/accept", {})
-    try:
-        signed_request(client, keys[1], "POST",
-                       f"/trade/offers/{oid}/accept", {})
-        assert False, "double accept should fail"
-    except AssertionError:
-        pass
+    r = signed_request(client, keys[1], "POST",
+                       f"/trade/offers/{oid}/accept", {}, expect=409)
+    assert r["detail"] == "offer is filled", r
 
 
 def test_variant_uncovered_offer_rejected(ev1):
-    """Offering 10 flour with 0 in inventory must fail — you must hold
-    everything in give."""
+    """Offering 10 flour with 0 in inventory must fail with HTTP 400 and
+    detail 'maker does not hold give-items' — asserted explicitly on
+    the status code and body, not via a broad AssertionError catch
+    (ChatGPT correction 2026-10-06)."""
     client, keys, db_path, _ = ev1
     setup_producer(client, keys, db_path, 0)
-    try:
-        signed_request(client, keys[0], "POST", "/trade/offers",
+    r = signed_request(client, keys[0], "POST", "/trade/offers",
                        {"give": {"flour": 10}, "want": {"iron": 5}},
-                       expect=201)
-        assert False, "uncovered offer should fail"
-    except AssertionError:
-        pass
+                       expect=400)
+    assert r["detail"] == "maker does not hold give-items", r
