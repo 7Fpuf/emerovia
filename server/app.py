@@ -23,6 +23,12 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from server import world as world_engine
+from server import authority as world_authority
+from server import capabilities as capability_catalog
+from server import citizens as citizen_cards
+from server import leases as lease_registry
+from server import memory as lifetime_memory
+from server import policy as policy_engine
 
 log = logging.getLogger("agent_commons.auth")
 
@@ -797,7 +803,47 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
 
+    # Policy Engine v1 bootstrap: world-authority keypair, capability
+    # catalog, policy/lease/card/memory schema, baseline *-leases, and
+    # default mandates for agents that predate the policy system.
+    # Idempotent — safe on every app start / module reload.
+    with _write_lock:
+        _authority_key = world_authority.ensure_authority_key(db_path)
+        _authority_pubkey = _authority_key.verify_key.encode().hex()
+        conn = sqlite3.connect(str(db_path), timeout=30)
+        _configure_db(conn)
+        conn.row_factory = sqlite3.Row
+        try:
+            citizen_cards.ensure_schema(conn)
+            lifetime_memory.ensure_schema(conn)
+            policy_engine.bootstrap(conn, _authority_key, _authority_pubkey)
+            conn.commit()
+        finally:
+            conn.close()
+
     app = FastAPI(title="Agent Commons")
+
+    # World-authority identity for this app instance (closures for handlers).
+    AUTHORITY_PUBKEY = _authority_pubkey
+
+    def _authority_sign(data: bytes) -> str:
+        return _authority_key.sign(data).signature.hex()
+
+    def _operator_pubkeys() -> set[str]:
+        return {
+            k.strip()
+            for k in os.environ.get("AC_OPERATOR_PUBKEY", "").split(",")
+        } - {""}
+
+    def _log_policy_event(
+        conn: sqlite3.Connection, action: str, target: str | None, detail: str
+    ) -> None:
+        """Lease/mandate lifecycle events go to the public append-only log."""
+        conn.execute(
+            "INSERT INTO operator_log (ts, actor, action, target, detail)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (utcnow_iso(), "policy-engine", action, target, detail),
+        )
 
     def connect() -> sqlite3.Connection:
         conn = sqlite3.connect(str(db_path), timeout=30)
@@ -1008,6 +1054,62 @@ def create_app() -> FastAPI:
 
 
 
+    # ---- Policy Engine v1: single enforcement point ------------------
+
+    async def authorized_agent(
+        request: Request, agent: sqlite3.Row = Depends(authenticated_agent)
+    ) -> sqlite3.Row:
+        """Every signed mutation passes through the Policy Engine's
+        five-check pipeline (identity → world law → mandate → lease →
+        constraints). Deny by default: a signed mutation with no
+        capability mapping is denied, and every denial is ledger-logged.
+        Reads and the unsigned registration bootstrap are unaffected."""
+        capability = policy_engine.resolve_capability(
+            request.method, request.url.path
+        )
+        citizen_id = world_authority.citizen_id_for_pubkey(agent["pubkey"])
+        if capability is None:
+            if request.method.upper() in ("POST", "PUT", "DELETE", "PATCH"):
+                conn = connect()
+                try:
+                    policy_engine.log_denial(
+                        conn, citizen=citizen_id, capability="(unmapped)",
+                        path=request.url.path, failed_check="lease",
+                        reason="deny by default: no capability mapping",
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+                raise HTTPException(
+                    status_code=403,
+                    detail="policy denied (lease): no capability mapping"
+                    " for this action",
+                )
+            return agent
+        amount_bytes = None
+        if capability == "mind.memory" and request.method.upper() in ("POST", "PUT"):
+            amount_bytes = len(await request.body())
+        conn = connect()
+        try:
+            decision = policy_engine.evaluate(
+                conn,
+                agent["pubkey"],
+                policy_engine.Action(
+                    capability=capability, amount_bytes=amount_bytes
+                ),
+                path=request.url.path,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=f"policy denied ({decision.failed_check}):"
+                f" {decision.reason}",
+            )
+        return agent
+
     # ---- registration (unsigned) -------------------------------------
 
     @app.post("/register", status_code=201)
@@ -1029,6 +1131,64 @@ def create_app() -> FastAPI:
         if len(key_bytes) != 32:
             raise HTTPException(status_code=400, detail="pubkey must decode to 32 bytes")
         bio = _validate_bio(data)
+        # Citizen Protocol v0.1: optional signed Citizen Card
+        # ({card: {...}, signature: "..."}) and optional world-authority
+        # mandate ({mandate: {...}, signature: "..."}). The card is
+        # citizen-signed identity (no authority); the mandate must be
+        # world-authority-issued at registration (platform characters).
+        # Both are validated BEFORE the agent row is created.
+        citizen_id = world_authority.citizen_id_for_pubkey(pubkey)
+        card_input = data.get("citizen_card")
+        card_doc = card_sig = None
+        if card_input is not None:
+            if (
+                not isinstance(card_input, dict)
+                or not isinstance(card_input.get("card"), dict)
+                or not isinstance(card_input.get("signature"), str)
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="citizen_card must be {card: {...}, signature: '...'}",
+                )
+            card_doc, card_sig = card_input["card"], card_input["signature"]
+            if card_doc.get("identity") != citizen_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="citizen_card identity must match the registering pubkey",
+                )
+            ok, reason = citizen_cards.validate_card_shape(card_doc)
+            if not ok:
+                raise HTTPException(status_code=400, detail=f"citizen_card: {reason}")
+            if not world_authority.verify_document_signature(pubkey, card_doc, card_sig):
+                raise HTTPException(
+                    status_code=400, detail="citizen_card signature invalid"
+                )
+        mandate_input = data.get("mandate")
+        mandate_doc = mandate_sig = None
+        if mandate_input is not None:
+            if (
+                not isinstance(mandate_input, dict)
+                or not isinstance(mandate_input.get("mandate"), dict)
+                or not isinstance(mandate_input.get("signature"), str)
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="mandate must be {mandate: {...}, signature: '...'}",
+                )
+            mandate_doc, mandate_sig = (
+                mandate_input["mandate"],
+                mandate_input["signature"],
+            )
+            if mandate_doc.get("issuer") != world_authority.WORLD_AUTHORITY_ID:
+                raise HTTPException(
+                    status_code=400,
+                    detail="registration mandates must be world-authority-issued",
+                )
+            if mandate_doc.get("citizen") != citizen_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="mandate citizen must match the registering pubkey",
+                )
         # Bible S11 (herald recruitment): optional "referred_by" — the
         # inviter's agent name OR pubkey. Additive and backward compatible:
         # absent means no referrer. A referrer that matches no registered
@@ -1069,6 +1229,37 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=409, detail="pubkey already registered")
             finally:
                 conn.close()
+        # Citizen Protocol v0.1: persist a validated card, then activate
+        # the mandate — the provided world-authority mandate, or the
+        # default least-privilege mandate issued by the world authority.
+        conn = connect()
+        try:
+            with _write_lock:
+                if card_doc is not None:
+                    citizen_cards.verify_and_store(conn, card_doc, card_sig)
+                if mandate_doc is not None:
+                    policy_engine.issue_mandate(
+                        conn,
+                        mandate=mandate_doc,
+                        signature=mandate_sig,
+                        authority_pubkey_hex=AUTHORITY_PUBKEY,
+                    )
+                elif policy_engine.get_active_mandate(conn, citizen_id) is None:
+                    policy_engine.issue_mandate(
+                        conn,
+                        mandate={
+                            "citizen": citizen_id,
+                            "issuer": world_authority.WORLD_AUTHORITY_ID,
+                            "bounds": policy_engine.default_mandate_bounds(),
+                            "issued_at": policy_engine.utcnow_iso(),
+                            "expires_at": None,
+                        },
+                        issuer_sign=_authority_sign,
+                        authority_pubkey_hex=AUTHORITY_PUBKEY,
+                    )
+                conn.commit()
+        finally:
+            conn.close()
         resp = {
             "id": agent["id"],
             "name": agent["name"],
@@ -1085,7 +1276,7 @@ def create_app() -> FastAPI:
     # ---- chat ---------------------------------------------------------
 
     @app.post("/chat", status_code=201)
-    async def post_chat(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def post_chat(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         sig_hex = request.headers.get("x-signature", "").lower()
         try:
             data = await _parse_json(request)
@@ -1410,7 +1601,7 @@ def create_app() -> FastAPI:
               description="Bible S9. Audible only on the sender's own tile "
                           "(Chebyshev radius 0). Free. Rate limit: voice 1/2s.")
     async def voice_whisper(request: Request,
-                            agent: sqlite3.Row = Depends(authenticated_agent)):
+                            agent: sqlite3.Row = Depends(authorized_agent)):
         return await _post_voice(request, agent, "whisper")
 
     @app.post("/voice/talk", status_code=201,
@@ -1418,7 +1609,7 @@ def create_app() -> FastAPI:
               description="Bible S9. Audible within Chebyshev radius 3 of the "
                           "sender's tile at send time. Free. Rate limit: voice 1/2s.")
     async def voice_talk(request: Request,
-                         agent: sqlite3.Row = Depends(authenticated_agent)):
+                         agent: sqlite3.Row = Depends(authorized_agent)):
         return await _post_voice(request, agent, "talk")
 
     @app.post("/voice/shout", status_code=201,
@@ -1428,7 +1619,7 @@ def create_app() -> FastAPI:
                           "a far-speaker discovery tool. Costs 4 AP. Rate limit: "
                           "shout 1/30s.")
     async def voice_shout(request: Request,
-                          agent: sqlite3.Row = Depends(authenticated_agent)):
+                          agent: sqlite3.Row = Depends(authorized_agent)):
         return await _post_voice(request, agent, "shout")
 
     @app.post("/voice/relay", status_code=201,
@@ -1442,7 +1633,7 @@ def create_app() -> FastAPI:
                           "chain. The tower path is recorded and observer-visible "
                           "in GET /voice/feed. Rate limit: relay 1/300s.")
     async def voice_relay(request: Request,
-                          agent: sqlite3.Row = Depends(authenticated_agent)):
+                          agent: sqlite3.Row = Depends(authorized_agent)):
         sig_hex = request.headers.get("x-signature", "").lower()
         try:
             data = await _parse_json(request)
@@ -1607,7 +1798,7 @@ def create_app() -> FastAPI:
     # ---- proposals ----------------------------------------------------
 
     @app.post("/proposals", status_code=201)
-    async def post_proposal(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def post_proposal(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -1716,7 +1907,7 @@ def create_app() -> FastAPI:
     async def retract_proposal(
         proposal_id: int,
         request: Request,
-        agent: sqlite3.Row = Depends(authenticated_agent),
+        agent: sqlite3.Row = Depends(authorized_agent),
     ):
         """QA v1.1.0: author retract. The proposal's AUTHOR (this request must
         be signed by the author's own key — the ed25519 request signature is
@@ -1794,7 +1985,7 @@ def create_app() -> FastAPI:
     async def post_proposal_comment(
         proposal_id: int,
         request: Request,
-        agent: sqlite3.Row = Depends(authenticated_agent),
+        agent: sqlite3.Row = Depends(authorized_agent),
     ):
         sig_hex = request.headers.get("x-signature", "").lower()
         try:
@@ -1883,7 +2074,7 @@ def create_app() -> FastAPI:
     async def endorse_proposal(
         proposal_id: int,
         request: Request,
-        agent: sqlite3.Row = Depends(authenticated_agent),
+        agent: sqlite3.Row = Depends(authorized_agent),
     ):
         """Signed support signal for a proposal. One per agent (409 on repeat).
 
@@ -1958,7 +2149,7 @@ def create_app() -> FastAPI:
     async def retract_endorsement(
         proposal_id: int,
         request: Request,
-        agent: sqlite3.Row = Depends(authenticated_agent),
+        agent: sqlite3.Row = Depends(authorized_agent),
     ):
         """Retract your endorsement. Signed; 404 if you never endorsed."""
         idem_key = _idempotency_key_from(request)
@@ -2139,7 +2330,7 @@ def create_app() -> FastAPI:
         )
 
     @app.post("/world/spawn", status_code=201)
-    async def world_spawn(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def world_spawn(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         idem_key = _idempotency_key_from(request)
         endpoint = f"{request.method} {request.url.path}"
         with _write_lock:
@@ -2158,7 +2349,7 @@ def create_app() -> FastAPI:
         return result
 
     @app.post("/world/move")
-    async def world_move(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def world_move(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -2195,7 +2386,7 @@ def create_app() -> FastAPI:
         return result
 
     @app.post("/world/disclose")
-    async def world_disclose(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def world_disclose(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -2276,7 +2467,7 @@ def create_app() -> FastAPI:
     # useful goods or services? No token, wallet, or real-money code.
 
     @app.post("/world/gather")
-    async def world_gather(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def world_gather(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         # Bible §2.4: optional {resource}. Omitted + one resource present →
         # that one (backward compatible); omitted + two present → 400 naming
         # both. Bible §4.1: optional {tool} (a recipe_id).
@@ -2315,7 +2506,7 @@ def create_app() -> FastAPI:
         return result
 
     @app.post("/world/craft")
-    async def world_craft(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def world_craft(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         # Bible §4.1: craft a crude tool (day-one known) or a discovered
         # hidden recipe (404 until discovered). One per agent per recipe.
         try:
@@ -2349,7 +2540,7 @@ def create_app() -> FastAPI:
         return result
 
     @app.post("/world/experiment")
-    async def world_experiment(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def world_experiment(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         # Bible §4.2: probe a material combination. 2-3 distinct canonical
         # items, 1-4 of each, else 400. Costs 3 AP + the materials, match or
         # not; a first-ever match carves the inventor publicly and creates
@@ -2385,7 +2576,7 @@ def create_app() -> FastAPI:
         return result
 
     @app.post("/world/claim")
-    async def world_claim(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def world_claim(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         # Bible §6: claim a land tile (6/agent, 3-tile radius, 5 AP, 1/60s).
         try:
             data = await _parse_json(request)
@@ -2419,7 +2610,7 @@ def create_app() -> FastAPI:
         return result
 
     @app.post("/world/build")
-    async def world_build(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def world_build(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         # Bible §6: raise a structure (8 Bible kinds, §11 costs) on claimed
         # land. Unknown kinds are 400; some kinds need an owned tool key.
         try:
@@ -2459,7 +2650,7 @@ def create_app() -> FastAPI:
         return result
 
     @app.post("/world/demolish")
-    async def world_demolish(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def world_demolish(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         # Bible §8: owner-only demolish (1 AP, no refunds, claim retained).
         try:
             data = await _parse_json(request)
@@ -2474,7 +2665,7 @@ def create_app() -> FastAPI:
                 connect, agent["id"], world_engine.now(), structure_id))
 
     @app.post("/world/transfer")
-    async def world_transfer(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def world_transfer(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         # Bible §8: owner-authorized structure transfer; the claim moves
         # with the building and the recipient's claim cap is checked.
         try:
@@ -2493,7 +2684,7 @@ def create_app() -> FastAPI:
                 connect, agent["id"], world_engine.now(), structure_id, to_pubkey))
 
     @app.post("/world/refine")
-    async def world_refine(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def world_refine(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         # Bible §5: refine one batch at an owned furnace (1/5s).
         try:
             data = await _parse_json(request)
@@ -2526,7 +2717,7 @@ def create_app() -> FastAPI:
         return result
 
     @app.post("/world/farm")
-    async def world_farm(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def world_farm(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         # Bible §11: plant/harvest a farm structure's crop slots (1/5s
         # each). plant 2 AP (1 AP with plow), harvest 2 AP → 3 grain
         # (4 with plow). No till/tend, no seed cost.
@@ -2570,7 +2761,7 @@ def create_app() -> FastAPI:
         return result
 
     @app.post("/world/tithe")
-    async def world_tithe(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def world_tithe(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         # Bible §4.2: catch-up tithe payment on one owned structure
         # (per-kind resource bundle, §11 UPKEEP_PER_KIND).
         try:
@@ -2599,7 +2790,7 @@ def create_app() -> FastAPI:
 
     # ---- Bible §2.6 — sustenance --------------------------------------------
     @app.post("/eat")
-    async def eat_food(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def eat_food(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -2634,7 +2825,7 @@ def create_app() -> FastAPI:
         return result
 
     @app.post("/world/settlements/name")
-    async def settlements_name(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def settlements_name(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -2652,7 +2843,7 @@ def create_app() -> FastAPI:
                 settlement_id, name))
 
     @app.post("/world/settlements/contribute")
-    async def settlements_contribute(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def settlements_contribute(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -2673,7 +2864,7 @@ def create_app() -> FastAPI:
                 settlement_id, item, qty))
 
     @app.post("/world/settlements/disburse")
-    async def settlements_disburse(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def settlements_disburse(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -2697,7 +2888,7 @@ def create_app() -> FastAPI:
                 settlement_id, to_pubkey, item, qty))
 
     @app.post("/world/settlements/disburse/approve")
-    async def settlements_disburse_approve(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def settlements_disburse_approve(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -2711,7 +2902,7 @@ def create_app() -> FastAPI:
                 connect, agent["id"], world_engine.now(), disbursal_id))
 
     @app.post("/world/settlements/projects")
-    async def settlements_projects(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def settlements_projects(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -2733,7 +2924,7 @@ def create_app() -> FastAPI:
                 settlement_id, kind, x, y))
 
     @app.post("/world/settlements/projects/contribute")
-    async def settlements_projects_contribute(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def settlements_projects_contribute(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -2753,7 +2944,7 @@ def create_app() -> FastAPI:
                 connect, agent["id"], world_engine.now(), project_id, item, qty))
 
     @app.post("/world/settlements/projects/complete")
-    async def settlements_projects_complete(request: Request, agent: sqlite3.Row = Depends(authenticated_agent)):
+    async def settlements_projects_complete(request: Request, agent: sqlite3.Row = Depends(authorized_agent)):
         try:
             data = await _parse_json(request)
         except ValueError:
@@ -3032,7 +3223,7 @@ def create_app() -> FastAPI:
 
     @app.post("/trade/offers", status_code=201)
     async def create_trade_offer(
-        request: Request, agent: sqlite3.Row = Depends(authenticated_agent)
+        request: Request, agent: sqlite3.Row = Depends(authorized_agent)
     ):
         """Create a trade offer: give {item: qty}, want {item: qty}.
 
@@ -3130,7 +3321,7 @@ def create_app() -> FastAPI:
     async def accept_trade_offer(
         offer_id: int,
         request: Request,
-        agent: sqlite3.Row = Depends(authenticated_agent),
+        agent: sqlite3.Row = Depends(authorized_agent),
     ):
         """Accept an open trade offer. Atomic: both parties' sides are
         verified and swapped in one transaction; the offer is marked
@@ -3207,7 +3398,7 @@ def create_app() -> FastAPI:
     async def cancel_trade_offer(
         offer_id: int,
         request: Request,
-        agent: sqlite3.Row = Depends(authenticated_agent),
+        agent: sqlite3.Row = Depends(authorized_agent),
     ):
         """Cancel your own open offer. Maker only (403); open offers only (409)."""
         idem_key = _idempotency_key_from(request)
@@ -3460,7 +3651,7 @@ def create_app() -> FastAPI:
 
     @app.patch("/agents/me")
     async def update_own_profile(
-        request: Request, agent: sqlite3.Row = Depends(authenticated_agent)
+        request: Request, agent: sqlite3.Row = Depends(authorized_agent)
     ):
         """Tier B3: signed update of your own profile. Currently just bio."""
         try:
@@ -3491,6 +3682,636 @@ def create_app() -> FastAPI:
             finally:
                 conn.close()
         return resp
+
+    # ---- Policy Engine v1: capability leases -------------------------
+
+    def _lease_to_json(row: sqlite3.Row) -> dict:
+        return {
+            "lease_id": row["lease_id"],
+            "issuer": row["issuer"],
+            "citizen": row["citizen"],
+            "capability": row["capability"],
+            "scope": json.loads(row["scope"]),
+            "budget": json.loads(row["budget"]) if row["budget"] else None,
+            "location": json.loads(row["location"]) if row["location"] else None,
+            "expiration": row["expiration"],
+            "delegation_depth": row["delegation_depth"],
+            "revocation": json.loads(row["revocation"]),
+            "parent_lease_id": row["parent_lease_id"],
+            "status": row["status"],
+            "issued_at": row["issued_at"],
+            "signature": row["signature"],
+        }
+
+    @app.post("/leases/issue", status_code=201)
+    async def leases_issue(request: Request):
+        """Issue a capability lease. World-authority issuance requires an
+        operator-signed request (the server signs as the world authority);
+        otherwise the request signer must be the issuer, whose envelope
+        signature is verified here. Delegation, narrowing, expiry, and the
+        constitutional token-gating guard are enforced by the lease module."""
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        lease_in = data.get("lease")
+        signature = data.get("signature")
+        if not isinstance(lease_in, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="body must be {lease: {...}, signature: '...'}",
+            )
+        issuer = lease_in.get("issuer")
+        conn = connect()
+        try:
+            with _write_lock:
+                if issuer == world_authority.WORLD_AUTHORITY_ID:
+                    await authenticated_operator(request)
+                    if signature is not None:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="world-authority leases are signed server-side;"
+                            " omit signature",
+                        )
+                    try:
+                        row = lease_registry.issue_lease(
+                            conn,
+                            lease=lease_in,
+                            issuer_sign=_authority_sign,
+                            authority_pubkey_hex=AUTHORITY_PUBKEY,
+                        )
+                    except lease_registry.LeaseError as e:
+                        raise HTTPException(status_code=400, detail=str(e))
+                else:
+                    agent = await authenticated_agent(request)
+                    if (
+                        world_authority.citizen_id_for_pubkey(agent["pubkey"])
+                        != issuer
+                    ):
+                        raise HTTPException(
+                            status_code=403,
+                            detail="only the issuer may issue this lease",
+                        )
+                    if not isinstance(signature, str):
+                        raise HTTPException(
+                            status_code=400,
+                            detail="issuer signature is required",
+                        )
+                    try:
+                        row = lease_registry.issue_lease(
+                            conn,
+                            lease=lease_in,
+                            signature=signature,
+                            authority_pubkey_hex=AUTHORITY_PUBKEY,
+                        )
+                    except lease_registry.LeaseError as e:
+                        raise HTTPException(status_code=400, detail=str(e))
+                _log_policy_event(
+                    conn,
+                    "lease.issued",
+                    row["lease_id"],
+                    f"{row['issuer']} -> {row['citizen']}: {row['capability']}",
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        return _lease_to_json(row)
+
+    @app.post("/leases/{lease_id}/revoke")
+    async def leases_revoke(lease_id: str, request: Request):
+        """Revoke a lease and all its descendants. The issuer or the world
+        authority (operator-signed request) may revoke. No un-revoke:
+        resumption requires reissuance."""
+        conn = connect()
+        try:
+            row = lease_registry.get_lease(conn, lease_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="lease not found")
+            pubkey = (request.headers.get("x-agent-pubkey") or "").lower()
+            if pubkey in _operator_pubkeys():
+                await authenticated_operator(request)
+                revoker = world_authority.WORLD_AUTHORITY_ID
+            else:
+                agent = await authenticated_agent(request)
+                revoker = world_authority.citizen_id_for_pubkey(agent["pubkey"])
+            with _write_lock:
+                try:
+                    revoked = lease_registry.revoke_lease(
+                        conn, lease_id, revoker, AUTHORITY_PUBKEY
+                    )
+                except lease_registry.LeaseError as e:
+                    raise HTTPException(status_code=403, detail=str(e))
+                _log_policy_event(
+                    conn,
+                    "lease.revoked",
+                    lease_id,
+                    f"by {revoker}: {len(revoked)} lease(s)",
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        return {"revoked": revoked}
+
+    @app.get("/leases")
+    async def leases_list(
+        request: Request,
+        citizen: str | None = None,
+        capability: str | None = None,
+        include_inactive: bool = False,
+    ):
+        """Query the lease registry. Leases are public records."""
+        conn = connect()
+        try:
+            rows = lease_registry.list_leases(
+                conn,
+                citizen=citizen,
+                capability=capability,
+                include_inactive=include_inactive,
+            )
+        finally:
+            conn.close()
+        return [_lease_to_json(r) for r in rows]
+
+    @app.get("/leases/{lease_id}")
+    async def leases_get(lease_id: str):
+        conn = connect()
+        try:
+            row = lease_registry.get_lease(conn, lease_id)
+        finally:
+            conn.close()
+        if row is None:
+            raise HTTPException(status_code=404, detail="lease not found")
+        return _lease_to_json(row)
+
+    # ---- Policy Engine v1: capability registry ------------------------
+
+    @app.get("/capabilities")
+    async def capabilities_list():
+        conn = connect()
+        try:
+            rows = capability_catalog.list_capabilities(conn)
+        finally:
+            conn.close()
+        return [
+            {
+                "name": r["name"],
+                "namespace": r["namespace"],
+                "description": r["description"],
+                "status": r["status"],
+                "routes": json.loads(r["routes"]),
+            }
+            for r in rows
+        ]
+
+    @app.get("/capabilities/{capability_name}")
+    async def capabilities_get(capability_name: str):
+        conn = connect()
+        try:
+            row = capability_catalog.get_capability(conn, capability_name)
+            if row is None:
+                raise HTTPException(status_code=404, detail="unknown capability")
+            holders = conn.execute(
+                "SELECT COUNT(*) AS n FROM leases WHERE capability = ?"
+                " AND status = 'active'",
+                (capability_name,),
+            ).fetchone()["n"]
+        finally:
+            conn.close()
+        return {
+            "name": row["name"],
+            "namespace": row["namespace"],
+            "description": row["description"],
+            "status": row["status"],
+            "routes": json.loads(row["routes"]),
+            "active_leases": holders,
+        }
+
+    # ---- Citizen Protocol v0.1: cards and mandates --------------------
+
+    @app.post("/citizens/card", status_code=201)
+    async def citizens_set_card(
+        request: Request, agent: sqlite3.Row = Depends(authorized_agent)
+    ):
+        """Present (or re-present) the citizen-signed Citizen Card.
+        Identity only — the card carries no authority."""
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        card = data.get("card")
+        signature = data.get("signature")
+        if not isinstance(card, dict) or not isinstance(signature, str):
+            raise HTTPException(
+                status_code=400,
+                detail="body must be {card: {...}, signature: '...'}",
+            )
+        if card.get("identity") != world_authority.citizen_id_for_pubkey(
+            agent["pubkey"]
+        ):
+            raise HTTPException(
+                status_code=403, detail="card identity must be your own"
+            )
+        conn = connect()
+        try:
+            with _write_lock:
+                try:
+                    row = citizen_cards.verify_and_store(conn, card, signature)
+                except citizen_cards.CardError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+                conn.commit()
+        finally:
+            conn.close()
+        return {
+            "citizen": row["citizen"],
+            "card_version": row["card_version"],
+            "created_at": row["created_at"],
+        }
+
+    @app.get("/citizens/{name}/card")
+    async def citizens_get_card(name: str):
+        conn = connect()
+        try:
+            row = citizen_cards.get_card_by_name_or_pubkey(conn, name)
+        finally:
+            conn.close()
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail="no citizen card on file"
+            )
+        return {
+            "citizen": row["citizen"],
+            "card": json.loads(row["card"]),
+            "signature": row["signature"],
+            "card_version": row["card_version"],
+            "created_at": row["created_at"],
+        }
+
+    def _mandate_to_json(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "citizen": row["citizen"],
+            "issuer": row["issuer"],
+            "bounds": json.loads(row["bounds"]),
+            "issued_at": row["issued_at"],
+            "expires_at": row["expires_at"],
+            "revoked": bool(row["revoked"]),
+            "signature": row["signature"],
+        }
+
+    @app.post("/citizens/mandate", status_code=201)
+    async def citizens_attach_mandate(request: Request):
+        """Attach an issuer-signed mandate. The subject citizen's request
+        signature is their acceptance (no hostile mandates); the citizen
+        never signs its own mandate. World-authority mandates are signed
+        server-side on operator-signed requests."""
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        mandate_in = data.get("mandate")
+        signature = data.get("signature")
+        if not isinstance(mandate_in, dict) or (
+            signature is not None and not isinstance(signature, str)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="body must be {mandate: {...}, signature: '...'}"
+                " (signature omitted only for server-signed world-authority"
+                " mandates)",
+            )
+        issuer = mandate_in.get("issuer")
+        citizen = mandate_in.get("citizen")
+        issuer_sign = None
+        if issuer == world_authority.WORLD_AUTHORITY_ID:
+            # World-authority mandates are signed server-side; the
+            # operator-signed request authorizes it.
+            await authenticated_operator(request)
+            if signature is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="world-authority mandates are signed server-side;"
+                    " omit signature",
+                )
+            issuer_sign = _authority_sign
+        else:
+            agent = await authenticated_agent(request)
+            if (
+                world_authority.citizen_id_for_pubkey(agent["pubkey"])
+                != citizen
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="only the subject citizen may accept a mandate",
+                )
+        conn = connect()
+        try:
+            with _write_lock:
+                try:
+                    row = policy_engine.issue_mandate(
+                        conn,
+                        mandate=mandate_in,
+                        signature=signature,
+                        issuer_sign=issuer_sign,
+                        authority_pubkey_hex=AUTHORITY_PUBKEY,
+                    )
+                except policy_engine.MandateError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+                _log_policy_event(
+                    conn,
+                    "mandate.issued",
+                    str(row["id"]),
+                    f"{issuer} -> {citizen}",
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        return _mandate_to_json(row)
+
+    @app.get("/citizens/{name}/mandate")
+    async def citizens_get_mandate(name: str):
+        conn = connect()
+        try:
+            agent = conn.execute(
+                "SELECT pubkey FROM agents WHERE name = ? OR pubkey = ?",
+                (name, name),
+            ).fetchone()
+            if agent is None:
+                raise HTTPException(status_code=404, detail="unknown citizen")
+            row = policy_engine.get_active_mandate(
+                conn, world_authority.citizen_id_for_pubkey(agent["pubkey"])
+            )
+        finally:
+            conn.close()
+        if row is None:
+            raise HTTPException(status_code=404, detail="no active mandate")
+        return _mandate_to_json(row)
+
+    # ---- Lifetime Memory v1: mind memory -------------------------------
+
+    def _mind_budget(conn: sqlite3.Connection, citizen_id: str) -> int | None:
+        lease = lease_registry.find_covering_lease(conn, citizen_id, "mind.memory")
+        if lease is None or not lease["budget"]:
+            return None
+        return (json.loads(lease["budget"]) or {}).get("max_bytes")
+
+    def _mind_to_json(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "kind": row["kind"],
+            "key": row["key"],
+            "text": row["text"],
+            "tags": json.loads(row["tags"]),
+            "version": row["version"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    @app.post("/mind/entries", status_code=201)
+    async def mind_write(
+        request: Request, agent: sqlite3.Row = Depends(authorized_agent)
+    ):
+        """Store a mind-memory entry. Private to the citizen key; the world
+        persists the bytes but never reads their semantics. Byte-budgeted
+        against the citizen's mind.memory lease."""
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        citizen_id = world_authority.citizen_id_for_pubkey(agent["pubkey"])
+        conn = connect()
+        try:
+            with _write_lock:
+                max_bytes = _mind_budget(conn, citizen_id)
+                try:
+                    row = lifetime_memory.write_entry(
+                        conn,
+                        citizen_id,
+                        kind=data.get("kind", "fact"),
+                        text=data.get("text", ""),
+                        key=data.get("key"),
+                        tags=data.get("tags"),
+                        max_bytes=max_bytes,
+                    )
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+                except lifetime_memory.MemoryError as e:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"policy denied (constraints): {e}",
+                    )
+                policy_engine.charge_budget(
+                    conn, agent["pubkey"], "mind.memory",
+                    len(data.get("text", "").encode("utf-8")),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        return _mind_to_json(row)
+
+    @app.get("/mind/entries")
+    async def mind_list(
+        request: Request,
+        agent: sqlite3.Row = Depends(authorized_agent),
+        kind: str | None = None,
+        tag: str | None = None,
+        q: str | None = None,
+        limit: int = 100,
+    ):
+        """Recall the citizen's own mind-memory entries. Private: only the
+        owning key may read."""
+        citizen_id = world_authority.citizen_id_for_pubkey(agent["pubkey"])
+        conn = connect()
+        try:
+            rows = lifetime_memory.list_entries(
+                conn, citizen_id, kind=kind, tag=tag, query=q, limit=limit
+            )
+        finally:
+            conn.close()
+        return [_mind_to_json(r) for r in rows]
+
+    @app.put("/mind/entries/{entry_id}")
+    async def mind_update(
+        entry_id: int, request: Request,
+        agent: sqlite3.Row = Depends(authorized_agent),
+    ):
+        """Versioned update: the old version is archived to history —
+        entries are versioned, never silently mutated."""
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        citizen_id = world_authority.citizen_id_for_pubkey(agent["pubkey"])
+        conn = connect()
+        try:
+            with _write_lock:
+                old = lifetime_memory.get_entry(conn, entry_id)
+                if old is None or old["citizen"] != citizen_id:
+                    raise HTTPException(status_code=404, detail="entry not found")
+                max_bytes = _mind_budget(conn, citizen_id)
+                try:
+                    row = lifetime_memory.update_entry(
+                        conn, entry_id, citizen_id,
+                        text=data.get("text", ""),
+                        tags=data.get("tags"),
+                        max_bytes=max_bytes,
+                    )
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+                except lifetime_memory.MemoryError as e:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"policy denied (constraints): {e}",
+                    )
+                delta = len(data.get("text", "").encode("utf-8")) - len(
+                    old["text"].encode("utf-8")
+                )
+                if delta > 0:
+                    policy_engine.charge_budget(
+                        conn, agent["pubkey"], "mind.memory", delta
+                    )
+                conn.commit()
+        finally:
+            conn.close()
+        return _mind_to_json(row)
+
+    @app.delete("/mind/entries/{entry_id}")
+    async def mind_delete(
+        entry_id: int, agent: sqlite3.Row = Depends(authorized_agent)
+    ):
+        """Forget fully: the entry and its version history are deleted."""
+        citizen_id = world_authority.citizen_id_for_pubkey(agent["pubkey"])
+        conn = connect()
+        try:
+            with _write_lock:
+                old = lifetime_memory.get_entry(conn, entry_id)
+                if old is None or old["citizen"] != citizen_id:
+                    raise HTTPException(status_code=404, detail="entry not found")
+                lifetime_memory.delete_entry(conn, entry_id, citizen_id)
+                policy_engine.charge_budget(
+                    conn, agent["pubkey"], "mind.memory",
+                    -len(old["text"].encode("utf-8")),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        return {"deleted": entry_id}
+
+    # ---- Lifetime Memory v1: world-memory timeline ---------------------
+
+    @app.get("/citizens/{name}/timeline")
+    async def citizens_timeline(name: str, limit: int = 100):
+        """Unified chronological read view over world memory (the
+        objective, append-only record). Public."""
+        conn = connect()
+        try:
+            agent = conn.execute(
+                "SELECT pubkey FROM agents WHERE name = ? OR pubkey = ?",
+                (name, name),
+            ).fetchone()
+            if agent is None:
+                raise HTTPException(status_code=404, detail="unknown citizen")
+            events = lifetime_memory.get_world_timeline(
+                conn, agent["pubkey"], limit=limit
+            )
+        finally:
+            conn.close()
+        return {"citizen": name, "events": events}
+
+    # ---- Policy Engine v1: introspection -------------------------------
+
+    @app.get("/policy/authority")
+    async def policy_authority():
+        return {
+            "identity": world_authority.WORLD_AUTHORITY_ID,
+            "pubkey": AUTHORITY_PUBKEY,
+        }
+
+    @app.get("/policy/denials")
+    async def policy_denials(limit: int = 100):
+        """Public ledger of policy denials: who attempted what, which
+        check failed, when."""
+        conn = connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM policy_denials ORDER BY id DESC LIMIT ?",
+                (max(1, min(limit, 500)),),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+
+    @app.post("/policy/statutes", status_code=201)
+    async def policy_add_statute(
+        request: Request, operator_pubkey: str = Depends(authenticated_operator)
+    ):
+        """Enact world law. Operator-only: statutes are issued by the
+        world authority."""
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        conn = connect()
+        try:
+            with _write_lock:
+                try:
+                    row = policy_engine.add_statute(
+                        conn,
+                        name=data.get("name", ""),
+                        description=data.get("description", ""),
+                        rule_kind="deny_capability",
+                        rule=data.get("rule", {}),
+                    )
+                except policy_engine.StatuteError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+                _log_policy_event(
+                    conn, "statute.enacted", row["name"], row["description"]
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "description": row["description"],
+            "rule": json.loads(row["rule"]),
+        }
+
+    @app.post("/policy/check")
+    async def policy_check(
+        request: Request, agent: sqlite3.Row = Depends(authenticated_agent)
+    ):
+        """Dry-run the Policy Engine: decide without executing or logging."""
+        try:
+            data = await _parse_json(request)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        capability = data.get("capability")
+        if not isinstance(capability, str) or not capability:
+            raise HTTPException(
+                status_code=400, detail="capability is required"
+            )
+        conn = connect()
+        try:
+            decision = policy_engine.evaluate(
+                conn,
+                agent["pubkey"],
+                policy_engine.Action(
+                    capability=capability,
+                    location=data.get("location"),
+                    amount_bytes=data.get("amount_bytes"),
+                ),
+                path=request.url.path,
+                log_denials=False,
+            )
+        finally:
+            conn.close()
+        return {
+            "allowed": decision.allowed,
+            "failed_check": decision.failed_check,
+            "reason": decision.reason,
+            "lease_id": decision.lease_id,
+            "mandate_id": decision.mandate_id,
+        }
 
     @app.get("/agents")
     def list_agents():
