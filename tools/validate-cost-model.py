@@ -262,6 +262,61 @@ def main():
     check("worked_example_total_gain_ap", x_gain + y_gain, 14.3, 0.4,
           "F=16 flour")
 
+    # ---- Phase 1: discrete-mechanics constraints (executed, 2026-10-06)
+    # The continuous model above assumes fractional farm cycles and
+    # fractional gathers. Executed reality is lumpy. These checks pin
+    # the discrete feasibility constraints discovered in Phase 1
+    # integration tests (tests/test_econ_validation_phase1.py).
+    #
+    # Farm cycle quanta: one full cycle (plant 4 + harvest 4) yields
+    # exactly 12 grain without plow, 16 with plow. Flour refines 2:2,
+    # so flour comes in 12- or 16-unit quanta. A rational window (lo, hi)
+    # is EXECUTABLE only if it contains a cycle-exact quantity.
+    farm_quanta = {"noplow": 12.0, "plow": 16.0}
+    check("discrete_flour_quantum_noplow", farm_quanta["noplow"], 12.0,
+          0.01, "one farm cycle, no plow")
+    check("discrete_flour_quantum_plow", farm_quanta["plow"], 16.0,
+          0.01, "one farm cycle, plow")
+
+    # Complementary-advantage window (13.0, 20.2): 16 is cycle-exact
+    # (plow) -> executable. This is the v2.3 worked example.
+    feasible_complementary = [q for q in (12.0, 16.0, 24.0, 32.0)
+                              if window_lo < q < window_hi]
+    check("window_has_cycle_exact_qty", float(len(feasible_complementary)),
+          1.0, 0.01, f"quantities {feasible_complementary} in window")
+
+    # Ore-advantage-only window (Y ore_bounty, neither has plow):
+    # X gains iff F*2.33 < 35.4 -> F < 15.2; Y gains iff 30.4 < F*2.33
+    # -> F > 13.0. Window (13.0, 15.2) contains NO multiple of 12 ->
+    # the continuous prediction is INFEASIBLE under discrete mechanics.
+    ore_only_lo = y_iron10 / y_flour_u
+    ore_only_hi = x_iron10 / y_flour_u
+    check("ore_only_window_lo", ore_only_lo, 13.0, 0.3)
+    check("ore_only_window_hi", ore_only_hi, 15.2, 0.3)
+    feasible_ore_only = [q for q in (12.0, 24.0)
+                         if ore_only_lo < q < ore_only_hi]
+    check("ore_only_window_cycle_exact_count",
+          float(len(feasible_ore_only)), 0.0, 0.01,
+          "no cycle-exact F in (13.0, 15.2): continuous window infeasible")
+
+    # Noise dominance: gather comes in 2-unit increments, so the final
+    # partial gather adds up to +/-2 AP of lumpiness noise per
+    # production run. A predicted gain smaller than 2 AP cannot have
+    # its sign reliably predicted.
+    check("lumpiness_noise_band_ap", 2.0, 2.0, 0.01,
+          "max gather-lumpiness noise per production run")
+
+    # At the nearest cycle-exact quanta flanking the infeasible
+    # ore-only window, mutual gains do NOT hold (farmed flour, no plow):
+    # F=12: X gains (35.4-27.96) but Y loses (27.96-30.4).
+    # F=24: Y gains but X loses. The window is a mirage.
+    x_gain_f12 = x_iron10 - 12.0 * y_flour_u
+    y_gain_f12 = 12.0 * y_flour_u - y_iron10
+    check("ore_only_f12_not_mutual",
+          float(1.0 if (x_gain_f12 > 0) != (y_gain_f12 > 0) else 0.0),
+          1.0, 0.01,
+          f"F=12: x_gain={x_gain_f12:.2f}, y_gain={y_gain_f12:.2f}")
+
     print()
     if failures:
         print(f"{len(failures)} CLAIM(S) BROKEN — spec §4 needs re-derivation:")
