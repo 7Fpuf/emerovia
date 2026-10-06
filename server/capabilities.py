@@ -131,10 +131,19 @@ def namespace_status(conn: sqlite3.Connection, namespace: str) -> str | None:
 
 def is_issuable(conn: sqlite3.Connection, capability: str) -> tuple[bool, str]:
     """Can a lease be issued for this capability at all? Closed namespaces
-    (tool.*) are never issuable — not even by the world authority."""
+    (tool.*) are never issuable — not even by the world authority.
+    Chartered namespaces (gov.vote, gov.charter, org.*) are not issuable
+    until charter machinery exists: chartered powers require a charter,
+    and there is no charter issuer in v1 (the world authority does not
+    grant itself chartered powers by default)."""
     cap = get_capability(conn, capability)
     if cap is None:
         return False, f"unknown capability '{capability}'"
     if cap["status"] == "closed":
         return False, f"capability namespace '{cap['namespace']}' is closed"
+    if cap["status"] == "chartered":
+        return False, (
+            f"capability '{capability}' requires a charter"
+            " (charter machinery not yet issued in v1)"
+        )
     return True, ""

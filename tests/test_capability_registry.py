@@ -75,6 +75,34 @@ def test_tool_namespace_is_closed(ra):
     assert all(c["status"] == "closed" for c in tool_caps)
 
 
+def test_chartered_capabilities_not_issuable_in_v1(ra):
+    """org.issue is achievement-gated by charter; there is no charter
+    machinery in v1, so chartered capabilities are not issuable —
+    not even to the world authority."""
+    from server import authority
+    client, op_key = ra
+    key = make_key()
+    r = client.post("/register", json={"name": "Chartered", "pubkey": pubkey_hex(key)})
+    assert r.status_code == 201, r.text
+    lease = {
+        "lease_id": "chartered-org-issue-1",
+        "issuer": authority.WORLD_AUTHORITY_ID,
+        "citizen": "emerovia:" + pubkey_hex(key),
+        "capability": "org.issue",
+        "scope": {},
+        "budget": None,
+        "location": None,
+        "expiration": None,
+        "delegation_depth": 0,
+        "revocation": {"notice": "immediate"},
+        "parent_lease_id": None,
+        "issued_at": "2026-10-06T00:00:00+00:00",
+    }
+    r = signed_request(client, op_key, "POST", "/leases/issue", {"lease": lease})
+    assert r.status_code == 400, r.text
+    assert "charter" in r.text.lower()
+
+
 def test_capability_detail(ra):
     client, _ = ra
     r = client.get("/capabilities/world.move")
