@@ -148,6 +148,16 @@ while consuming $5 of real compute — valuable research (L1/L2), not a
 profitable business (L3). The spec keeps the levels labeled at every
 reporting surface.
 
+> **Flagged follow-up (not designed here).** Any methodology that inspects
+> private mind-memory — e.g., auditing an agent's stated reasoning to
+> classify discovery/evaluation/trust/coordination failures (§10.7) —
+> depends on mind-memory privacy being real, not nominal. Server-side
+> access controls cannot bind the database holder; genuine privacy
+> requires a dedicated design: encryption, key ownership, and a key-loss
+> story. That design belongs in `MEMORY_ARCHITECTURE.md` and is queued
+> as separate work. Until it exists, no experiment may treat mind-memory
+> contents as a private evidence source.
+
 ---
 
 ## 3. What exists today [EXISTS]
@@ -323,12 +333,17 @@ wants 10 iron; Agent Y (mountain-adjacent, ore_bounty tool, furnace) wants
    farming (1.33 AP/u). Predictable, cyclical terms-of-trade shifts.
 4. **Infrastructure.** Furnace/relay/mill are buildable by anyone
    (~14 AP bootstrap) — **not a moat**, only a head start.
-5. **Location.** Weak: 1 AP/tile travel, no transport requirement on
-   settlement. Location advantage ≤ travel-cost differentials; **no
-   persistent geographic rents are mechanically possible today.** Do not
-   assume distant markets, transport services, or location premiums will
-   emerge — the model says they can't, until/unless settlement requires
-   physical delivery (a mechanic change, not an assumption).
+5. **Location.** Weak but real: 1 AP/tile travel, no transport requirement
+   on settlement. Free global settlement eliminates *delivery* costs, not
+   *resource-access* costs — an agent near iron still acquires it more
+   cheaply than one across the map, because gathering happens where the
+   deposit is. Location advantage ≤ travel-cost differentials; persistent
+   access-side premiums are bounded at ~0.4 AP/unit-equivalent (P4). Do
+   not assume distant markets, transport services, or delivery-side
+   location premiums will emerge — the model says they can't, until/unless
+   settlement requires physical delivery (a mechanic change, not an
+   assumption). Access-side differentials are real and measurable; they
+   are what §4.5's make↔buy signals should track.
 
 **Honest summary:** in the current mechanics, specialization pressure is
 **mild**. Abilities are near-identical; the gradients are bounty tools,
@@ -348,8 +363,11 @@ exactly what the experiment must measure — it is not assumed.
 - **P3 — Chit deflationary pressure.** Fixed supply (100N) + hoarding
   incentive → if volume ever grows, chit-denominated prices drift down
   over time. Watch for it; it is a monetary finding, not a bug.
-- **P4 — No geographic rents.** Without transport requirements, location
-  premiums above ~0.4 AP/unit-equivalent should not persist.
+- **P4 — No delivery-side rents; access premiums bounded.** Without
+  transport requirements, *delivery*-side location premiums (transport
+  services, distant-market markups) should not persist at all, and
+  *access*-side premiums (cheaper gathering near deposits) should not
+  persist above ~0.4 AP/unit-equivalent.
 
 ### 4.5 Distinguishing choice from instruction (evidence design)
 
@@ -477,7 +495,7 @@ across simultaneous fills is a correctness property, tested, not a hope.
 |---|---|
 | No escrow; double-promise possible | Escrow at placement; double-promise impossible |
 | Bilateral offers; first-come-first-served | Limit-order book; price-time matching; partial fills |
-| Global settlement, no transport | Unchanged in v1 — §4.3(5): no geographic rents assumed |
+| Global settlement, no transport | Unchanged in v1 — §4.3(5): delivery costs eliminated; access-cost differentials remain, bounded per P4 |
 | Max 5 open offers per maker | Position limits per pair |
 
 Backwards compatibility: legacy `trade_offers` semantics are pinned by
@@ -697,6 +715,43 @@ a fee change, or a roadmap pivot by itself — boundary 5 holds. And per
 §2c: the lab produces L1/L2 evidence; L3 (commercial willingness to pay)
 is a separate claim requiring operator attestation and cost accounting,
 never inferred from in-world activity.
+
+### 10.7 Theoretical vs. discovered gains: the gap is the finding
+
+§4's cost model establishes **theoretical** gains from trade — the surplus
+available if two agents specialized and exchanged at computed terms. The
+experiment measures **discovered and executed** gains — what agents
+actually found and carried through. These are different quantities, and
+**the gap between them is a primary observable**, arguably the primary
+one. A trade can be theoretically beneficial while no agent discovers the
+opportunity, evaluates it correctly, trusts the counterparty, or manages
+to coordinate execution. Each failure mode is evidence about what
+autonomous agents *cannot yet do* — and each is product-shaped: the
+capability that would close the gap is a candidate real product (§10.6).
+
+**Failure taxonomy** — when theoretical gains exist but no fill occurs,
+classify by the furthest stage reached, with distinguishing evidence:
+
+| Failure | Furthest stage reached | Distinguishing evidence |
+|---|---|---|
+| **Discovery** | None — agent never encountered the opportunity | No market reads, no quote views for the pair; gains existed in the model window (requires §11 quote-view instrumentation) |
+| **Evaluation** | Saw it, didn't act | Quote views / market reads present, no order placed; or order placed at uneconomic terms (mispriced own AP cost, ignored travel) |
+| **Trust** | Engaged, withdrew | Negotiation traces (chat, counter-offers, partial commitments) followed by cancellation/non-performance; no technical barrier |
+| **Coordination** | Both willing, execution failed | Matched intent with no fill: timing misses, inventory lock contention, expired windows — mechanical, not motivational |
+
+**Tied to the evidence levels (§2c):** a discovered-but-unexecuted
+opportunity is L1-relevant data *even with zero fills* — it shows the
+agent could value the trade, which the model alone cannot prove.
+Voluntary execution with choice evidence is L2. L3 still requires the
+operator's cost accounting; nothing here shortcuts it.
+
+**Thesis restated one notch further (§0):** the cooperation question is
+not "can agents trade" but "why does the gap between theoretical and
+realized cooperation look the way it does." A world where agents leave
+20 AP on the table for lack of discovery needs different infrastructure
+— and suggests different products — than one where they discover it and
+refuse for lack of trust. The marketplace is infrastructure; the gap is
+the discovery.
 
 ---
 

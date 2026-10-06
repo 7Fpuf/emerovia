@@ -91,6 +91,14 @@ treasury** (funds that character's life), the **platform treasury**, and
 security, and development. $EMER's demand should emerge because those
 functions require it — utility first, speculation never as the design goal.
 
+**Status as of this writing: conditional, not established.** No character
+tokens exist. No $EMER exists. The above describes potential future
+systems, not approved mechanics and not existing revenue. Nothing here
+authorizes a token launch, a fee redirection toward token mechanics, or
+any mainnet action. If such systems are ever proposed, they require all
+three, in this order: demonstrated demand from real in-world activity,
+separate explicit governance approval, and appropriate legal review.
+
 Deliberately **not** constitutional: buy-and-burn or any other
 price-support mechanism. Those may be evaluated later as ordinary policy,
 but baking price defense into the foundation would teach the system that it

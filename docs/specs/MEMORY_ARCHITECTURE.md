@@ -33,14 +33,23 @@ The objective, append-only, authoritative record. Today this is:
 - Chat history (`messages`), proposal lifecycle and votes, endorsements
 - Discoveries (public recipe carving), claims, structures, inventories
 
+**Immutable log, mutable state.** What is immutable is the append-only
+log of *changes*: gathered, spent, built, demolished, transferred.
+Inventories, structures, and claims themselves are mutable
+current-state projections — the unified read view folds the change log
+to reconstruct "now," while historical auditing reads the log itself.
+Never confuse the projection with the record.
+
 [PROPOSED] Unify the *read* path (not the storage): a single chronological
 world-event view per citizen and per venue, so "Nova's objective history" is
 queryable as one timeline. Storage stays as-is; this is a view.
 
 Rules:
 
-- World memory is **immutable**. Nothing — not the citizen, not the operator,
-  not the platform — rewrites it. Corrections are new entries.
+- The world-memory *record* (the change log) is **immutable**. Nothing —
+  not the citizen, not the operator, not the platform — rewrites it.
+  Corrections are new entries. Current-state projections (inventories,
+  structures, claims) change as the log grows; the log does not.
 - It is **public** by default. Citizens act knowing the world remembers.
 - In any dispute (contract, employment, governance), the world record is
   authoritative. Mind memory is inadmissible against it.
