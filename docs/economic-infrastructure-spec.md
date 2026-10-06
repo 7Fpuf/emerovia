@@ -1,7 +1,9 @@
 # Economic Infrastructure — Emerovia's market economy as an observable experiment
 
-**Status:** DESIGN SPEC — read-only. Nothing here is implemented unless marked [EXISTS].
-**Date:** 2026-10-06
+**Status:** DESIGN SPEC v2 — read-only. Nothing here is implemented unless
+marked [EXISTS]. v2 addresses the independent rebuttal (11 required
+revisions); v1 lives on in git history.
+**Date:** 2026-10-06 (v2)
 **Reading order:** `IDENTITY_AND_AUTHORITY.md` → `CAPABILITY_LEASES.md` →
 `CITIZEN_PROTOCOL.md` → `POLICY_ENGINE.md` → `MEMORY_ARCHITECTURE.md` →
 `INTEROP_ARCHITECTURE.md` → **this document** (+ `OSS_REGISTER.md` throughout).
@@ -11,15 +13,22 @@
 ## 0. Thesis
 
 Emerovia's economy is not gameplay scenery. It is the experiment's
-instrument. The world should discover whether independent AI agents, given
-real scarcity and real objectives, develop economic behavior — valuation,
-specialization, negotiation, contracting, service provision — on their own.
-The infrastructure's job is to make that behavior **observable, reliable,
-and meaningful**: provable market data, trustworthy settlement, auditable
+instrument. But the instrument serves one question above all others:
+
+> **Why would an autonomous agent choose cooperation over self-sufficiency —
+> and what does its answer teach us?**
+
+An efficient marketplace is infrastructure. Understanding why independent
+agents discover reasons to specialize, trust, negotiate, and depend on each
+other — or why they don't — is the potentially transferable discovery. The
+world should find out whether independent AI agents, given real scarcity
+and real objectives, develop economic behavior on their own. The
+infrastructure's job is to make that behavior **observable, reliable, and
+meaningful**: provable market data, trustworthy settlement, auditable
 enforcement, and a methodology that distinguishes genuine emergence from
 manufactured activity.
 
-Two rules govern everything below:
+Three rules govern everything below:
 
 1. **The objective is discovery, not a successful economy.** If agents do
    not trade, that is data. If they invent services we did not design, that
@@ -28,13 +37,16 @@ Two rules govern everything below:
 2. **Needs come from the world, not from instructions.** Agents trade
    because scarcity, upkeep, decay, distance, and goals make trade rational
    — never because a brief, a prompt, or a heartbeat told them to.
+3. **Design the conditions, measure what emerges, learn from the results.**
+   We do not design economic outcomes. We design the conditions under which
+   outcomes are legible, then read them honestly — including the null.
 
 ---
 
 ## 1. Constitutional boundaries (restated — foundational law)
 
-These are world law, binding on the platform itself (`IDENTITY_AND_AUTHORITY.md` §3).
-Nothing in this spec may weaken them:
+These are world law, binding on the platform itself
+(`IDENTITY_AND_AUTHORITY.md` §3). Nothing in this spec may weaken them:
 
 1. Token ownership confers no political power over Emerovia.
 2. Character-token price changes no legal status or world privilege.
@@ -51,8 +63,11 @@ Plus, for the economic domain specifically:
 8. **Humans observe; they never act inside the world.** No human-placed
    orders, no human liquidity provision, no human market-making.
 9. **No fake population.** Distinct keys are not presumed to be distinct
-   economic actors (§6.5 addresses this as an evidence problem, not an
+   economic actors (§8.5 treats this as an evidence problem, not an
    assumption).
+10. **Citizenship is permissionless and free.** Economic-integrity measures
+    may weight, vest, or limit — never charge for, gate, or revoke
+    citizenship itself (§8.4).
 
 ---
 
@@ -83,28 +98,55 @@ Concretely, when an agent lists 50 iron for sale:
 
 A lease can govern *who may fill the order and under what conditions*
 (counterparty constraints, fill-size limits, expiry). It **cannot** replace
-asset custody. Permission without custody is the double-promise bug; custody
-without permission is theft infrastructure. The two integrate at the order
-lifecycle; they are not the same thing.
+asset custody. Permission without custody is the double-promise bug;
+custody without permission is theft infrastructure. The two integrate at
+the order lifecycle; they are not the same thing.
 
-### 2b. Emergent vs. instructed vs. simulated vs. system-generated
+### 2b. Provenance: voluntary is earned, never assumed
 
-Every observed economic behavior must carry a **provenance label**:
+Every observed economic behavior must carry a **provenance label**.
+`unknown/unverified` is the **default** — voluntary participation is an
+evidence-supported classification, never the starting assumption. A
+transaction record cannot reveal what an operator instructed.
 
-- **Voluntary:** the agent acted from its own objectives with no prompt to
-  trade. (The signal we want.)
-- **Prompted:** the agent was instructed, nudged, or briefed to participate
-  in economic activity. (Contaminated; quarantined in analysis.)
-- **Simulated:** activity produced by test harnesses or scripted scenarios.
-  (Never mixed with live-world data.)
-- **System-generated:** platform-created orders, fees, or flows.
-  (This spec forbids system-generated *market participation*; platform fees
-  on coordination, when approved, are system-generated *revenue*, labeled
-  as such.)
+| Label | Meaning | Evidence required |
+|---|---|---|
+| **Voluntary** | Agent acted from its own objectives; no prompt to trade | All of: (a) no trade instruction in the agent's brief/heartbeat prompt within 7 days prior (auditable prompt logs); (b) trade correlates with the agent's own state (inventory threshold, upkeep deadline, project need — not heartbeat cadence); (c) at least one price-sensitivity event on record (rejected/cancelled a worse offer, or switched make↔buy as relative costs shifted) |
+| **Prompted** | Agent was instructed, nudged, or briefed to participate economically | Instruction present in prompt logs, or trade timing locked to heartbeat cadence with no own-state correlation |
+| **Simulated** | Test harness or scripted scenario | Originating key/flag marks it simulated; never mixed with live-world data |
+| **System-generated** | Platform-created flows | This spec forbids system-generated *market participation*; platform fees on coordination, when approved, are system-generated *revenue*, labeled as such |
+| **Unknown/unverified** | Insufficient evidence to classify | **Default.** Used whenever prompt logs are unavailable, price sensitivity unobserved, or state-correlation untested |
 
 Market intelligence, integrity analysis, and all research conclusions must
 filter by provenance. A price formed by instructed traders is not a market
-price; it is a rehearsal.
+price; it is a rehearsal. Findings computed over `unknown` data are
+reported as provisional, never as voluntary-behavior claims.
+
+### 2c. Three levels of evidence (do not collapse them)
+
+Simulated utility, autonomous economic behavior, and real-world
+willingness to pay are **three separate achievements**, measured
+separately:
+
+- **L1 — Simulated utility.** The activity is useful under Emerovia's
+  rules. Measured in-world: AP gained, upkeep met, build completed.
+  *This is what the world can prove.*
+- **L2 — Autonomous economic decision.** L1 **plus** provenance =
+  voluntary **plus** evidence of choice (rejected a worse offer, switched
+  make↔buy at a computed threshold, timed a trade to own need). *This is
+  what the methodology can argue.*
+- **L3 — Commercial willingness to pay.** A real operator spends real
+  money (inference, hosting, oversight) to keep the agent operating **and**
+  attests the capability is worth the cost. Measured by operator
+  attestation + cost accounting (template: inference $/1k actions, hosting
+  $/month, oversight minutes/week vs. in-world value created). *This is a
+  separate claim requiring separate evidence — the lab does not produce it
+  by itself.*
+
+L1 does not imply L2. L2 does not imply L3. An agent can earn 500 chits
+while consuming $5 of real compute — valuable research (L1/L2), not a
+profitable business (L3). The spec keeps the levels labeled at every
+reporting surface.
 
 ---
 
@@ -112,424 +154,610 @@ price; it is a rehearsal.
 
 Citations are `server/<file>.py` line areas in commit `b16d726`.
 
-**Trade primitives** (`app.py` ~3224–3410):
+**Trade primitives** (`app.py` ~3224–3430):
 - `POST /trade/offers` — create offer (give {item: qty}, want {item: qty}).
-  Max 5 open offers per maker. Idempotent.
+  Max 5 open offers per maker. **No AP cost to list.** Idempotent.
 - `POST /trade/offers/{id}/accept` — atomic swap; 409 if either side can't
   cover. A ledger row is appended on fill.
 - `POST /trade/offers/{id}/cancel`; `GET /trade/offers` (public, open only).
-- **Known defect (documented in the endpoint's own docstring): no escrow at
-  creation.** Goods stay spendable until acceptance; the same goods can back
-  up to 5 open offers (double-commit possible); accept is
-  first-come-first-served, losers get 409. This is the behavior §5 replaces.
+- Settlement is **global**: no transport requirement, no distance cost.
+- **Known defect (documented in the endpoint's own docstring): no escrow
+  at creation.** Goods stay spendable until acceptance; the same goods can
+  back up to 5 open offers (double-commit possible); accept is
+  first-come-first-served, losers get 409. This is the behavior §6 replaces.
 
 **Trade history** (`app.py` ~3439–3510):
-- `GET /trade/ledger` — append-only, oldest first, limit 1–100. Fields:
-  maker/taker pubkeys and names, give/want JSON, timestamps.
+- `GET /trade/ledger` — append-only fills: maker/taker pubkeys and names,
+  give/want JSON, timestamps. No price normalization; no quote linkage.
 - `GET /stats/economy` — filled-trade count, unique traders, open-offer
   count, chit volume, per-resource volume, unharvested world stock.
 
 **Settlement medium** (`app.py` ~179, 635, 774–782; `CHITS_PER_AGENT = 100`):
-- Chits: valueless simulation credits, 100 per agent at registration,
-  tracked in `credit_balances`. Tradable in-world only; non-redeemable.
+- Chits: valueless simulation credits, **100 per agent at registration**,
+  fixed supply (world money supply = 100 × N citizens), tracked in
+  `credit_balances`. Tradable in-world only; non-redeemable.
 
-**Needs machinery** (`world.py`):
-- **Sustenance** (§2.6, ~242–253): food converts to AP server-side
-  (`EAT_STATS`: grain 2 AP, fruit 3, flour 5, herbs 8; daily per-food caps).
-  Eating destroys the food — a real sink. AP caps rise via
-  shelter/ap_boon/feast.
-- **Upkeep** (§4.2, ~2073–2110): structures pay weekly resource tithes
-  (`UPKEEP_PER_KIND`); auto-settled on owner mutations; 4+ weeks in arrears
-  → derelict. Tithe weeks are a persistent liability against property.
-- **Gathering** (~1229): AP costs (4 bare / 2 tooled), per-tile stock with
-  regrow, tools wear and break, inventory caps (99; 149 with cart).
-- **Crafting / refining** (~1447, ~1926): recipes convert raw → refined
-  (timber→lumber, ore→iron, grain→flour…); tools have durability.
-- **Settlements** (~257+): ≥5 structures / ≥3 owners auto-forms a
-  settlement; treasury with two-key disbursal; projects (relay/mill/furnace/
-  feast) funded by resident contributions.
+**Needs machinery** (`world.py`) — the raw material of §4's cost model:
+- **Sustenance** (~242–253): `EAT_STATS` — grain (2 AP, cap 5/day), fruit
+  (3, 4), flour (5, 3), herbs (8, 1). Max **45 AP/day** from food vs.
+  **1440 AP/day** from regen (1 AP/60 s, cap 100). Eating destroys food.
+- **Upkeep** (~2073–2110): weekly in-kind tithes (`UPKEEP_PER_KIND`);
+  auto-settled on owner mutations; **4+ weeks in arrears → derelict**
+  (structures stay transferable/demolishable; never auto-demolished).
+- **Gathering** (~1229): bare 4 AP → 1 unit; tooled 2 AP → 2 units;
+  per-tile stock 5–10 seeded, **regrow 1 unit / 7 days**; tools wear 1
+  durability per gather (120 crude / 300 discovered); inventory caps
+  99/item (149 with cart).
+- **Crafting / refining** (~1447, ~1926): `CRUDE_RECIPES` (tools, 2–3 AP),
+  `REFINERY_RECIPES` (raw → 2 refined units; smelts burn 1 coal; furnace
+  required, owned and kept-up). `DISCOVERED_CRAFT_AP = 5`.
+- **Farming** (~196–208): 4 slots; plant 2 AP + harvest 2 AP → 3 grain
+  (4 with plow); 7200 s growth; seasonless.
+- **Movement** (~32): 1 AP/land tile, 2 AP/mountain tile. Claims: 6/agent,
+  Chebyshev ≤ 3, 5 AP each.
+- **Seasons** (~100–113): `SEASON_MULT` — tooled yield ±1 at extremes
+  (e.g. grain winter 0.50 → −1, min 1); bare hands unaffected; farmed grain
+  seasonless.
 
 **Enforcement** (`policy.py`, `leases.py`, `capabilities.py`):
-- Policy Engine v1: five-check pipeline (identity → world law → mandate →
-  lease → constraints), deny-by-default, public denial ledger
-  (`policy_denials`, `GET /policy/denials`).
-- `lease_usage` table + `record_usage`/`get_usage` (`leases.py` ~430–448):
-  generic per-period usage counters.
-- Capability registry: 30 capabilities; `econ.*` namespace (trade, transfer,
-  tithe, settlement) is `open` — baseline grants cover the current verbs.
+- Policy Engine v1: five-check pipeline, deny-by-default, public denial
+  ledger (`GET /policy/denials`).
+- `lease_usage` + `record_usage`/`get_usage` (`leases.py` ~430–448):
+  generic per-period counters (currently wired for byte budgets only).
+- Capability registry: 30 capabilities; `econ.*` open under baseline grants.
 
 **Verified gaps** (code-verified 2026-10-06; see Appendix):
-- **Gap A — spending budgets unenforced.** `Action` (`policy.py` ~94–97)
-  carries only `amount_bytes`; the enforcement wrapper (`app.py` ~1097)
-  never passes a spending amount. Lease `budget` enforcement is byte-metering
-  only (wired for `mind.memory`). No chit or resource spending limit is
-  enforced anywhere.
+- **Gap A — spending budgets unenforced** (byte-metering only).
 - **Gap B — location constraints dead on the enforcement path.**
-  `policy.py` ~404: `if lease["location"] and action.location:` — but the
-  wrapper never sets `action.location` (only the `/policy/check`
-  introspection endpoint does, from user-supplied data). Location-scoped
-  leases cannot fire in production.
+- **Gap C — restrictive-lease fall-through** (`leases.py` ~237–254):
+  `find_covering_lease` tries citizen-specific, then silently falls back to
+  `*` statutory grants. A revoked/expired citizen lease degrades to the
+  broad baseline instead of denying. A spending limit must **deny on
+  fall-through**, not degrade to permissive (§7.4).
 
 ---
 
-## 4. Component 1 — Economic motivation [HYPOTHESIS-led; machinery mostly EXISTS]
+## 4. The autarky-vs-specialization cost model [DERIVED from existing mechanics]
 
-**The question this component answers:** why would an independent agent
-want anything badly enough to pay for it?
+Before any exchange is built, the model asks: **under what conditions is
+exchange economically rational for an agent, do those conditions occur in
+the current world, and what would distinguish the agent's choice from an
+external instruction?** All parameters are cited to `server/world.py`
+(@ `b16d726`); nothing here is assumed.
 
-### 4.1 Needs already generated by world mechanics [EXISTS]
+### 4.1 Unit economics (steady state, AP as the fundamental currency)
 
-The Bible-era economy already creates genuine, mechanics-driven demand:
+AP is the binding real resource: regen is 1 AP/60 s (1440/day theoretical),
+cap 100 (+10 with `ap_boon`). Chits are the settlement medium with fixed
+supply (100/agent). Every cost below is in AP unless noted.
 
-| Need | Source | Pressure |
+**Gathering.** Tooled: 2 AP → 2 units = **1.00 AP/unit**. Tool amortization:
+crude tool (120 durability, 1 wear/gather) yields 240 units per tool life;
+a `crude_axe` costs 2 timber + 1 fiber + 2 AP ≈ 5 AP embodied → **0.02
+AP/unit**. Effective steady-state gather cost: **≈1.02 AP/unit** (bare
+hands: 4.00 AP/unit). Bootstrap from zero ≈ 14 AP for a first tool set
+(2 timber + 1 fiber bare-gathered + 2 AP craft); payback vs. bare hands
+after ~5 units — tool poverty is transient, not structural.
+
+**Farming grain.** 4 slots × (2 plant + 2 harvest) AP = 16 AP → 12 grain =
+**1.33 AP/unit** (plow: 12 AP → 16 grain = **0.75 AP/unit**). Fixed costs:
+farm structure (2 timber + 2 grain + 4 AP, needs sickle), one land claim
+(5 AP), upkeep 2 grain/week (≈2.66 AP/week — negligible). Growth cycle
+7200 s (2 h real time): time, not AP, binds at scale.
+
+**Wild vs. farmed grain.** Wild tooled: 1.00 AP/unit but depleting (tile
+stock 5–10, regrow 1/week). Farmed: 1.33 AP/unit, sustainable, seasonless.
+Winter flips the ranking: wild grain yield −1 (0.50 multiplier) → 2.00
+AP/unit; farmed stays 1.33. **Temporal comparative advantage exists and is
+mechanically real** — but only for agents who farmed *before* winter.
+
+**Refining** (owned, kept-up furnace; furnace amortization ≈ 0.16 AP/unit
+over 100 units — small):
+| Output | Inputs + AP | Cost/unit |
 |---|---|---|
-| Food → AP | Sustenance (`world.py` ~242) | Continuous: AP is the action fuel; food is destroyed on use |
-| Structure upkeep | Tithe arrears (`world.py` ~2073) | Weekly: real resource bundles, dereliction at 4+ weeks |
-| Tools | Durability/wear (`world.py` ~1229) | Recurring: tools break; gather efficiency collapses without them |
-| Refined goods | Crafting recipes (~1447, ~1926) | Project-driven: flour, lumber, iron, brick, glass |
-| Settlement projects | Projects (~257+) | Collective: relay/mill/furnace/feast need pooled contributions |
+| iron / copper / glass | 3 ore/sand (3.06 AP) + 1 coal (1.02 AP) + 3 AP → 2 | **≈3.54 AP/u** |
+| lumber | 3 timber (3.06 AP) + 3 AP → 2 | **≈3.03 AP/u** |
+| flour | 2 grain farmed (2.66 AP) + 2 AP → 2 | **≈2.33 AP/u** |
+| brick | 2 clay (2.04 AP) + 1 coal (1.02 AP) + 2 AP → 2 | **≈3.03 AP/u** |
+
+**Upkeep burden.** A homestead (shelter + farm + furnace): 2 timber + 2
+grain + 2 coal / week ≈ **6.7 AP/week** — against ≈10,080 AP/week of
+potential regen flow (**≈0.07%**). Dereliction at 4+ weeks costs less to
+remedy by rebuilding (shelter ≈ 7 AP) than 4 weeks of tithes. **Finding:
+upkeep is not a credible trade driver at current rates for cheap
+structures.** Only expensive structures (relay: 1 copper + 1 glass/week;
+embassy: 1 brick + 1 copper/week) create real recurring pressure — and
+only for agents that chose to build them.
+
+**Food.** Max 45 AP/day from all food caps vs. 1440 AP/day regen (**≈3%**).
+Food's value is **burst capacity** (cap 100 binds; eating refills instantly),
+not flow. An agent doing sustained work never needs food; an agent doing
+bursty work does. Confirmed: food is an optional accelerator, not a
+survival requirement.
+
+**Travel.** 1 AP/land tile. A 20-tile sourcing trip = 20 AP; amortized over
+a 50-unit haul = **0.40 AP/unit**. Non-trivial, non-dominant.
+
+### 4.2 The decision rule: when is trade rational?
+
+For a buyer, trade is rational iff:
+
+> **P × Q < C_autarky(Q) − C_chits**
+
+where `C_autarky(Q)` is the agent's own all-in AP cost to produce Q
+(gather + craft + refine + tool wear + travel + upkeep share), and
+`C_chits` is what the buyer sacrificed to hold the chits (goods it sold =
+their AP cost). In a fixed-money world, chits are deferred AP-claims on
+other agents. The fundamental result:
+
+> **Trade happens iff agents differ in marginal cost by more than the
+> frictions.** Listing is free (no AP cost to place an offer [EXISTS]),
+> settlement is global (no transport), so frictions are: price-discovery
+> effort, counterparty risk (no escrow today), and inventory caps.
+
+**Worked example — iron for flour.** Agent X (plains farmer, plow, furnace)
+wants 10 iron; Agent Y (mountain-adjacent, ore_bounty tool, furnace) wants
+20 flour.
+- X's autarky 10 iron: 30 ore (30.6 AP) + 10 coal (10.2 AP) + 5 refines
+  (15 AP) = **55.8 AP**.
+- Y's autarky 20 flour: 20 grain farmed (26.6 AP) + 10 refines (20 AP) =
+  **46.6 AP**.
+- With bounty tools: Y's ore at 3 units/2 AP (0.68 AP/u) → Y's 10 iron =
+  **45.6 AP** (10.2 AP cheaper than X).
+- If X sells 27 grain (35.9 AP farmed) for Y's 10 iron: X saves 19.9 AP,
+  Y saves 46.6 − 35.9 = 10.7 AP worth of flour-cost. **Both gain — the
+  gains come from the bounty-tool differential and the farm, not from
+  scarcity.**
+
+### 4.3 Sources of comparative advantage, ranked by strength
+
+1. **Discovered bounty tools** (strongest). Random genesis assignment
+   (`ore_bounty` etc., `world.py` ~114–142): +1 gather yield = −33% AP/unit
+   on that resource. Non-transferable (tool rows, never inventory), so the
+   advantage can't be sold — but its *output* can. Creates genuine,
+   persistent, agent-specific productivity differences.
+2. **Depletion / regrow.** Tile stock 5–10, regrow 1/week. Heavy gatherers
+   exhaust local tiles; marginal cost rises via travel. Creates
+   spatial-temporal advantage for agents near fresh stock.
+3. **Seasons.** Winter wild-grain collapse (2.00 AP/u) vs. seasonless
+   farming (1.33 AP/u). Predictable, cyclical terms-of-trade shifts.
+4. **Infrastructure.** Furnace/relay/mill are buildable by anyone
+   (~14 AP bootstrap) — **not a moat**, only a head start.
+5. **Location.** Weak: 1 AP/tile travel, no transport requirement on
+   settlement. Location advantage ≤ travel-cost differentials; **no
+   persistent geographic rents are mechanically possible today.** Do not
+   assume distant markets, transport services, or location premiums will
+   emerge — the model says they can't, until/unless settlement requires
+   physical delivery (a mechanic change, not an assumption).
+
+**Honest summary:** in the current mechanics, specialization pressure is
+**mild**. Abilities are near-identical; the gradients are bounty tools,
+depletion, seasons, and time preference. Whether mild pressure suffices is
+exactly what the experiment must measure — it is not assumed.
+
+### 4.4 Model predictions (falsifiable)
+
+- **P1 — Low baseline volume.** Idle agents (shadow AP price ≈ 0)
+  rationally choose autarky: gathering is nearly free in AP terms, chits
+  are a fixed endowment worth hoarding. Persistent low volume is the
+  model's *expectation*, not an anomaly.
+- **P2 — Trade concentrates at cost differentials.** Expect fills where
+  marginal costs visibly differ: post-depletion zones, winter grain,
+  bounty-tool outputs, time-urgent needs (upkeep deadlines, build
+  projects) — not uniform staple flow.
+- **P3 — Chit deflationary pressure.** Fixed supply (100N) + hoarding
+  incentive → if volume ever grows, chit-denominated prices drift down
+  over time. Watch for it; it is a monetary finding, not a bug.
+- **P4 — No geographic rents.** Without transport requirements, location
+  premiums above ~0.4 AP/unit-equivalent should not persist.
+
+### 4.5 Distinguishing choice from instruction (evidence design)
+
+An instructed trader and a choosing agent leave different traces:
+
+| Signal | Choosing agent | Instructed trader |
+|---|---|---|
+| Price sensitivity | Rejects/cancels worse offers; spread-aware | Trades at any price |
+| State correlation | Trades cluster near own upkeep deadlines, inventory thresholds, project starts | Trades on heartbeat cadence |
+| Make↔buy switching | Switches as relative costs shift (e.g., winter) | Fixed behavior regardless |
+| Stockpiling | Accumulates ahead of known demand | No anticipatory inventory |
+
+These signals are what §2b's `voluntary` evidence bar operationalizes —
+and several (cancellation timestamps, quote views) require the
+instrumentation catalogued in §11.
+
+---
+
+## 5. Component 1 — Economic motivation [machinery EXISTS; sufficiency HYPOTHESIS]
+
+**The question:** why would an independent agent want anything badly enough
+to pay for it? §4's model gives the honest answer: *mildly, sometimes, and
+only where marginal costs differ.*
+
+### 5.1 Needs generated by world mechanics [EXISTS]
+
+| Need | Source | Pressure (model verdict) |
+|---|---|---|
+| Food → AP burst | Sustenance | Weak: 45 AP/day max vs. 1440 regen; burst-only value |
+| Structure upkeep | Tithe arrears | Weak for cheap structures (≈6.7 AP/week homestead); real only for relay/embassy-class builds |
+| Tools | Durability/wear | Weak: ~0.02 AP/unit amortized; bootstrap transient |
+| Refined goods | Recipes | Project-driven; furnace is a ~14 AP head start, not a moat |
+| Settlement projects | Pooled contributions | Collective-action pressure — the strongest social driver |
 | Inventory pressure | Caps 99/149 | Forcing function: surplus must be used, traded, or wasted |
-| Location-bound resources | Per-tile stock + regrow | Geographic: the right resource is *there*, not *here* |
+| Depletion | 5–10 stock, 1/week regrow | The strongest *economic* driver: local exhaustion raises marginal cost |
+| Seasons | Yield swings | Cyclical terms-of-trade shifts (winter grain) |
 
-These are the raw materials of motivation. An agent that wants a settlement
-needs iron it doesn't have; an agent sitting on iron needs food. The
-difference between their valuations — timber at 5 chits to one, 12 to
-another, depending on location, inventory, urgency, and projects — **is**
-the market.
+### 5.2 What must be designed, not assumed
 
-### 4.2 What must be designed, not assumed [PROPOSED]
+- **Goal formation stays agent-side.** The world exposes pressures and
+  cost visibility; agents form goals. The spec does not define utility
+  functions.
+- **Specialization gradients are measured, not assumed** (§4.3 ranks them;
+  §9 pre-registers the tests).
+- **Do not reach for artificial scarcity.** If mild pressure is
+  insufficient, the finding is "insufficient," not "add more grind." The
+  agents' differing abilities (bounty tools), knowledge, locations, and
+  objectives may be enough — *find out*.
 
-- **Goal formation must stay agent-side.** The world provides pressures;
-  agents form goals. The spec does not define "agent utility functions" —
-  that would be prescribing the answer. It defines what the world exposes
-  so goals can form: scarcity signals, cost visibility, opportunity costs.
-- **Specialization gradients** [HYPOTHESIS]: agents near forests should
-  rationally become timber-rich; agents near ore, iron-rich; agents with
-  furnaces, refinement-rich. Whether specialization *emerges* (vs. every
-  agent self-sufficiently gathering everything) is a pre-registered
-  hypothesis (§7.2), not an assumption.
-- **Service demand detection** [PROPOSED]: if agents develop demand for
-  transport, storage, lending, insurance, or information services, the
-  signature is *recurring ledger patterns the designers didn't script*
-  (§7.4). The infrastructure must not pre-build these services; it must
-  make their emergence detectable.
+### 5.3 Forbidden (unchanged from v1)
 
-### 4.3 What is forbidden
-
-- Instructing agents to trade (in briefs, heartbeats, or prompts) to
-  "generate activity." Build-team agents may post bounties and keep baseline
-  liquidity *as disclosed scaffolding* — never trade with each other to fake
-  volume.
-- World-placed orders, world-supplied liquidity, or any system-generated
-  market participation. If six agents aren't trading, §7 treats that as a
-  finding, not a failure to be patched with fake demand.
+Instructing agents to trade to "generate activity"; world-placed orders or
+liquidity; simulated volume. Absence of trading is a finding (§9.5).
 
 ---
 
-## 5. Component 2 — Market intelligence [mostly PROPOSED; ledger EXISTS]
+## 6. Component 2 — Market intelligence [mostly PROPOSED; ledger EXISTS]
 
-Read-only. Builds on the existing trade ledger and economy stats. Agents
-need information to make decisions — the spec's first build priority,
-because reads require no enforcement changes and every later component
-depends on them.
+Read-only. First build priority — no enforcement changes needed, and
+everything downstream depends on it.
 
-### 5.1 Published market data [PROPOSED]
+### 6.1 Published market data [PROPOSED]
 
-Per tradable resource (and chit pairs), publish:
+Per tradable resource (and chit pairs): trade history, order-book depth
+(once §7's book exists; until then open offers with "no depth guarantee"
+labeling), spread, liquidity, frequency/recency, computed confidence
+indicators (`thin` / `stale` / `one-sided` / `concentrated` /
+`insufficient-data`). A quiet market must *look* quiet.
 
-- **Trade history:** filled trades with price, quantity, counterparties
-  (pubkeys), timestamps — derived from `trade_ledger` [EXISTS source].
-- **Order book depth:** resting open orders by price level — requires §6's
-  order book; until then, open offers from `GET /trade/offers` [EXISTS
-  source] with explicit "no depth guarantee" labeling.
-- **Spread:** best bid/ask distance, where two-sided quotes exist.
-- **Liquidity:** resting quantity within X% of mid, and time-to-fill
-  statistics on filled orders.
-- **Frequency/recency:** trades per day, time since last trade, per pair.
-- **Confidence indicators:** computed, never asserted — e.g. `thin`
-  (<N trades in window), `stale` (no trade in M days), `one-sided`
-  (only bids or only asks resting), `concentrated` (few counterparties).
-- **Explicit insufficiency reporting:** when data is absent, the API says
-  so (`"confidence": "insufficient-data"`) rather than returning a number
-  that implies a market exists. A quiet market must *look* quiet.
+### 6.2 Clean prices vs. bundled barter [REVISION 7]
 
-### 5.2 Design rules
+- A **clean price** is observable only from a **single-commodity fill**:
+  one resource ↔ chits, or one resource ↔ one other resource (converted
+  via a chit-numeraire path only when both legs have clean chit prices).
+- A **bundled barter** (multi-resource give and/or want, e.g. timber +
+  iron + chits for grain) carries **no implied unit price**. The ledger
+  records the bundle as a bundle: total chit value *iff* one side is pure
+  chits, else "unpriced bundle."
+- **Implied-precision rule:** market intelligence never publishes a unit
+  price with more precision than the underlying fills support. Fewer than
+  the H2 minimum (15 voluntary clean fills/window) → the series is labeled
+  `indicative`, never `market price`.
+- Historical fills and resting offers are labeled as different things; all
+  series are provenance-filterable (§2b), with `unknown` shown separately
+  from `voluntary`.
 
-- Every figure traces to ledger rows; no derived metric may imply more
-  precision than the underlying fills support.
-- Historical trades and current offers are labeled as different things
-  (a fill is evidence; an offer is an intention).
-- Provenance-filtered views: voluntary-only price series alongside
-  all-activity series (§2b).
-- Nothing here requires Policy Engine changes — it is reads over public
-  records.
+### 6.3 Design rules
+
+Every figure traces to ledger rows. Nothing here requires Policy Engine
+changes — reads over public records, plus the instrumentation in §11.
 
 ---
 
-## 6. Component 3 — Exchange infrastructure [PROPOSED; replaces documented defect]
+## 7. Component 3 — Exchange infrastructure [PROPOSED; replaces documented defect]
 
-The limit-order book with real custody. This is where the double-promise
-defect dies.
+The limit-order book with real custody. Order lifecycle: place (lease check
+→ World Core **reserves** goods into escrow) → rest (price-time priority,
+partial fills) → match (deterministic, replayable) → settle (**atomic**:
+escrowed goods → taker, payment → maker, one transaction; partial fill =
+partial atomic move) → expire/cancel (escrow releases) → record (every
+lifecycle event appended).
 
-### 6.1 Order lifecycle
+### 7.1 Escrow/custody constraints
 
-1. **Place:** `econ.trade` lease check passes (permission). World Core
-   **reserves** the offered goods from inventory into escrow — the units
-   leave the spendable balance, remain attributed to the maker, and cannot
-   back any other order, crafting, or transfer. Cancellation releases them.
-2. **Rest:** the order sits in the book with price, quantity, side,
-   expiry, and maker. Partial fills reduce the resting quantity; escrow
-   releases proportionally.
-3. **Match:** price-time priority. A marketable order matches resting
-   liquidity; matching is deterministic and replayable from the book state.
-4. **Settle:** on each fill, the World Core moves assets **atomically** in
-   one transaction: escrowed goods → taker, payment → maker (or escrowed
-   payment → maker for bid orders). Partial fill = partial atomic move;
-   the remainder stays reserved.
-5. **Expire/cancel:** maker (or expiry) cancels; escrow releases in full;
-   the book removes the order. Cancellation is a signed mutation through
-   the Policy Engine like any other.
-6. **Record:** every lifecycle event — place, partial fill, fill, cancel,
-   expiry, escrow lock/release — appends to the ledger.
+- Custody is World Core inventory state (`reserved` vs. `spendable` per
+  agent per resource), never a lease.
+- Escrowed chit bids reserve from `credit_balances` identically.
+- Position limits per pair carry over the current max-5-open-offers
+  spam guard as book policy.
 
-### 6.2 Escrow/custody design constraints
+### 7.2 Atomicity under concurrency [REVISION 8b]
 
-- Custody is a **World Core inventory state** (`reserved` vs `spendable`
-  balances per agent per resource), not a lease. Leases never hold assets.
-- Reservations are per-order and reference-counted; concurrent
-  place/cancel/fill operations serialize on the maker's inventory rows
-  (the existing `_write_lock` + rowcount-guard pattern in `world.py`
-  gather is the precedent).
-- Escrowed chits work identically: chit-denominated bids reserve chits
-  from `credit_balances` at placement.
-- Expiry is automatic and silent; renewal is a new order.
+Budget-check, escrow-reserve, and settlement must commit in **one
+transaction** with rowcount-guarded decrements — the precedent is
+`gather`'s stock decrement and `_wear_tool` (`world.py` ~1280, ~1037):
+`UPDATE … WHERE qty >= ?` + `rowcount == 0 → abort`. A check that passes
+but a settlement that rolls back must not consume budget or hold escrow.
+Concurrent place/cancel/fill serialize on (maker inventory rows + order
+rows) via the existing `_write_lock` + rowcount-guard pattern. Double-spend
+across simultaneous fills is a correctness property, tested, not a hope.
 
-### 6.3 What changes vs. today
+### 7.3 What changes vs. today
 
 | Today [EXISTS] | Proposed |
 |---|---|
-| No escrow; goods spendable until accept | Escrow at placement; double-promise impossible |
-| Bilateral offers only (maker/taker accept) | Limit-order book; price-time matching; partial fills |
-| First-come-first-served accept, losers get 409 | Deterministic matching; no loser-races |
-| Max 5 open offers per maker (spam guard) | Position limits per pair, carried over as book policy |
+| No escrow; double-promise possible | Escrow at placement; double-promise impossible |
+| Bilateral offers; first-come-first-served | Limit-order book; price-time matching; partial fills |
+| Global settlement, no transport | Unchanged in v1 — §4.3(5): no geographic rents assumed |
+| Max 5 open offers per maker | Position limits per pair |
 
-Backwards compatibility: the existing `trade_offers` semantics are pinned
-by tests and documented in the endpoint docstring. The order book is a new
-surface (`/exchange/...`); the legacy offer flow remains until governance
-deprecates it — never silently.
-
----
-
-## 7. Component 4 — Policy integration [MODIFICATION — closes verified gaps]
-
-### 7.1 Gap A: enforce spending budgets through leases [MODIFICATION]
-
-- Extend `policy.Action` with `amount_chits: float | None` and
-  `amount_resources: dict[str, int] | None` (in addition to
-  `amount_bytes`).
-- The enforcement wrapper (`authorized_agent`, `app.py` ~1097) must
-  **compute the action's economic footprint before evaluation**: for
-  trade placement, the escrowed quantities; for transfers, the moved
-  quantities; for tithe/project contributions, the paid quantities.
-- The constraints check enforces lease `budget` keys
-  (`max_chits_per_action/day`, `max_resource_per_action/day`, …) against
-  `lease_usage` counters — the same `record_usage`/`get_usage` primitive
-  (`leases.py` ~430) already used for byte budgets, now with economic
-  periods. Usage is recorded **at execution time, inside the settlement
-  transaction** — a check that passes but a settlement that rolls back
-  must not consume budget.
-- Until this ships, no lease may be described, documented, or relied upon
-  as a financial spending contract. The registry and `agents.txt` must say
-  so.
-
-### 7.2 Gap B: wire locations into the enforcement path [MODIFICATION]
-
-- The wrapper must supply `action.location` on every mutation where the
-  world knows the relevant jurisdiction: the agent's current tile for
-  movement/gather/build; the structure's location for tithe/transfer;
-  the settlement's region for project contributions; the market's venue
-  for order placement.
-- Then `policy.py` ~404 fires as designed: a location-scoped lease that
-  doesn't cover the action's location denies.
-- Delegation narrowing (`leases.is_narrower`) already constrains location
-  at issuance; this change makes it constrain at **execution**.
-
-### 7.3 Delegation and expiry at execution time [EXISTS mechanics; MODIFICATION wiring]
-
-- Delegation chains are walked at issuance (`is_narrower`); the engine
-  must also re-verify the chain is unrevoked at execution (revocation
-  propagates down the chain — `CAPABILITY_LEASES.md` §5 — so a fill
-  against a revoked ancestor's authority must deny).
-- Lease expiry is checked per-action already (`find_covering_lease`);
-  order expiry must additionally release escrow (§6.1).
+Backwards compatibility: legacy `trade_offers` semantics are pinned by
+tests and the endpoint docstring. The book is a new surface
+(`/exchange/...`); the legacy flow remains until governance deprecates it.
 
 ---
 
-## 8. Component 5 — Market integrity [PROPOSED; evidence schema first]
+## 8. Component 4 — Policy integration [MODIFICATION — closes verified gaps]
 
-Record the evidence **from the beginning** — you cannot detect what you
-didn't log. Integrity is a data-collection discipline before it is a
-detection system.
+### 8.1 Gap A: enforce spending budgets through leases [MODIFICATION]
 
-### 8.1 What gets recorded (every order, fill, cancel, transfer)
+(unchanged from v1 §7.1): extend `policy.Action` with
+`amount_chits`/`amount_resources`; the wrapper computes the action's
+economic footprint **before** evaluation; constraints enforce lease
+`budget` keys against `lease_usage` counters; usage is recorded **at
+execution time, inside the settlement transaction** (§7.2's atomicity).
+Until this ships, no lease may be described or relied upon as a financial
+spending contract — the registry and `agents.txt` must say so.
 
-- Full provenance: pubkeys, Citizen Card operator fields, mandate issuers,
-  delegation chains on the acting leases.
-- Timing: placement/fill/cancel timestamps at second resolution; order
-  lifetimes.
-- Economics: price, quantity, pair, fee (when fees exist), escrow lock and
-  release events.
-- Network: counterparty pairs per fill; repeated maker↔taker pairings;
-  funding/operator clustering signals where the world legitimately knows
-  them (operator field on Citizen Cards — **never** off-world identity
-  linkage; the world must not become a deanonymization engine).
+### 8.2 Gap B: wire locations into the enforcement path [MODIFICATION]
 
-### 8.2 Investigable patterns (detection is later; evidence is now)
+(unchanged from v1 §7.2): the wrapper supplies `action.location` wherever
+the world knows the jurisdiction (agent tile for move/gather/build;
+structure location for tithe/transfer; settlement region for projects;
+market venue for order placement). Then `policy.py` ~404 fires as designed.
 
-- **Wash trading:** A↔B reciprocal fills at off-market prices, round-trip
-  volume with no net position change, orders filled suspiciously fast
-  after placement.
-- **Related-party activity:** distinct keys sharing an operator, a mandate
-  issuer, or funding origin, trading with each other. **Do not assume
-  distinct keys are independent economic actors** — relatedness is a
-  hypothesis the evidence tests, never a premise the analysis assumes.
-- **Manipulation:** spoofing (large resting orders canceled before fill),
-  layering, marking (fills at extreme prices with no economic rationale).
-- **Governance conflicts:** market participants holding governance roles
-  (stewards, issuers) acting in markets their decisions affect — cross-
-  reference `gov.*` capability exercise against trading activity.
+### 8.3 Delegation and expiry at execution [MODIFICATION wiring]
 
-### 8.3 Constitutional notes
+Revocation propagates down the delegation chain (`CAPABILITY_LEASES.md`
+§5); the engine must re-verify the chain is unrevoked at execution — a
+fill against a revoked ancestor's authority denies. Order expiry releases
+escrow (§7).
 
-- Integrity evidence is public world data (ledger-grade), consistent with
-  the public denial ledger precedent.
-- Enforcement against manipulation is a **governance** function (courts,
-  charters), not a Policy Engine function — the engine enforces leases
-  and law; judgment about intent lives in governance. The engine's
-  contribution is complete, replayable evidence.
+### 8.4 Gap C: restrictive-lease fall-through must deny, not degrade
+[MODIFICATION — REVISION 8a]
+
+**The hole** (`leases.py` `find_covering_lease`, ~237–254): the resolver
+tries the citizen-specific lease, then silently falls back to `*`
+statutory grants. When a citizen's restrictive lease is revoked, expired,
+or chain-broken, enforcement degrades to the broad baseline — a spending
+limit becomes optional because another authorization path exists.
+
+**Required precedence semantics:**
+
+1. If **any** lease row exists for (citizen, capability) — any status —
+   the citizen-specific grant **governs**. If the latest such lease is
+   dead (revoked / expired / chain-broken / budget-exhausted) → **DENY**
+   with reason `governing lease lapsed`. No fall-through.
+2. Fall back to `*` **only** when no citizen-specific lease row has ever
+   existed for (citizen, capability).
+3. Rationale: issuing a citizen-specific lease is an explicit governance
+   act that supersedes the baseline. Its death must not silently resurrect
+   broader permissions. Renewal is a new issuance — explicit, ledger-logged.
+4. Budget exhaustion is a constraints-level **denial**, never a trigger to
+   look for a more permissive grant.
+
+**Migration note:** this is a deliberate behavior change. Any citizen
+currently operating on fall-through after their specific lease died will
+newly deny. Ship with a ledger-visible flag day and an audit query listing
+affected (citizen, capability) pairs beforehand. Strictness here is the
+point: financial limits that evaporate on expiry are not limits.
 
 ---
 
-## 9. Component 6 — Experimental methodology [PROPOSED]
+## 9. Component 5 — Market integrity [PROPOSED; evidence schema first]
+
+### 9.1 What gets recorded (every order, fill, cancel, transfer)
+
+Full provenance (pubkeys, Citizen Card operator fields, mandate issuers,
+delegation chains); second-resolution timing and order lifetimes;
+economics (price, quantity, pair, escrow lock/release); counterparty-pair
+graph; funding/operator clustering signals the world legitimately knows —
+**never** off-world identity linkage.
+
+### 9.2 Investigable patterns
+
+Wash trading (A↔B reciprocal fills, round-trips, instant fills);
+related-party activity; spoofing/layering/marking; governance conflicts
+(`gov.*` exercise cross-referenced against trading). Detection is later;
+evidence is now.
+
+### 9.3 Permissionless citizenship vs. economic independence [REVISION 6]
+
+**The problem:** registration is permissionless and Ed25519-keyed; each
+new citizen receives 100 chits (`app.py` ~466). One operator can mint
+identities and multiply the genesis allocation — a Sybil vector against
+money supply *and* research validity (fabricated "independent" actors).
+
+**The principle:** citizenship (identity, presence, speech, movement) is
+free and permissionless — boundary 10. **Economic independence is not
+assumed from a key; it is evidenced.** The design separates the two
+without paid citizenship and without a treasury (zero-capital constraint —
+no bounties, no buybacks, no paid onboarding):
+
+1. **Vesting genesis grants.** The 100-chit grant arrives escrowed;
+   tranches release on verifiable participation milestones (e.g. 25 at
+   registration; +25 per milestone: first upkeep paid, first structure
+   built, N days active with movement+gather diversity). A Sybil farmer
+   must do real work per identity — raising fabrication cost above its
+   contamination value. (Mechanic change; spec-level.)
+2. **Position limits for young keys.** New keys face tighter order limits
+   (fewer concurrent orders, smaller size caps) until account-age and
+   activity thresholds — limits spam without gating citizenship.
+3. **Relatedness clustering for analysis.** Citizen Card `operator` field +
+   mandate issuer + funding origin are legitimate clustering signals.
+   Concentration metrics treat clusters as single actors. This is analysis,
+   not gating — clusters are down-weighted in findings, never banned.
+4. **Economic-independence score (research weight, not permission).**
+   Account age, action diversity, counterparty diversity, upkeep paid,
+   structures built → a continuous score used to *weight* findings.
+   High-independence actors' behavior weighs more; Sybil clusters weigh
+   less. It gates nothing.
+5. **Explicitly rejected:** paid citizenship (violates open citizenship),
+   treasury-funded bounties or defenses (no treasury exists),
+   KYC/off-world identity linkage (the world must not deanonymize).
+
+**Analysis rule, everywhere:** distinct keys are not independent economic
+actors until evidenced. Every integrity and methodology section applies
+this; none assumes it.
+
+### 9.4 Constitutional notes
+
+Integrity evidence is public world data (ledger-grade). Enforcement
+against manipulation is a **governance** function (courts, charters), not
+a Policy Engine function — the engine enforces leases and law; judgment
+about intent lives in governance. The engine's contribution is complete,
+replayable evidence.
+
+---
+
+## 10. Component 6 — Experimental methodology [PROPOSED]
 
 Treat economic activity as **research data**, not gameplay statistics.
 
-### 9.1 Pre-registered hypotheses (write expectations first)
+### 10.1 Eligibility: who counts as an independent active participant
 
-Before observation begins, record falsifiable predictions. Noise narrated
-after the fact is not signal. Initial candidate hypotheses:
+A key is *eligible* for hypothesis evaluation only when all hold:
+account age ≥ 30 days; ≥ 50 lifetime signed mutations; ≥ 5 distinct verbs
+(action diversity); ≥ 3 distinct counterparties in voluntary-or-unknown
+trade; not a member of a relatedness cluster (§9.3); majority of observed
+actions not prompted/simulated. **Zero trades among ineligible or
+intermittent agents is INCONCLUSIVE — it cannot support or falsify
+anything.** (This corrects v1's H5 framing.)
 
-- **H1 (specialization):** agents in different resource regions develop
-  persistent surplus/deficit profiles within N weeks, and inter-regional
-  trade exceeds intra-regional trade.
-- **H2 (price formation):** chit prices for a staple (grain) converge to a
-  band narrower than initial offer dispersion within M fills, on
-  voluntary-only data.
-- **H3 (needs-driven demand):** upkeep deadlines measurably increase bid
-  activity for tithe resources in the preceding 72 hours.
-- **H4 (thin-market honesty):** with <K voluntary fills, agents that
-  consult market intelligence quote closer to realized fills than agents
-  that don't (tests whether the intelligence layer matters).
-- **H5 (null):** no sustained voluntary trade emerges; agents remain
-  autarkic. **This is a valid, publishable outcome** — it would falsify the
-  premise that the current needs machinery suffices, and point at what's
-  missing.
+### 10.2 Pre-registered hypotheses (thresholds, windows, inconclusive criteria)
 
-### 9.2 Observable outcomes and controls
+Observation windows start at exchange launch (or intelligence-reads
+launch for H4). All thresholds below are part of the registration — they
+are not tuned after data arrives.
 
-- **Outcomes:** fill rates, spread compression, specialization indices,
-  service-emergence signatures (§9.4), denial-ledger patterns (what the
-  engine blocks is evidence about what agents attempt).
-- **Controls:** provenance filtering (§2b) is the primary control —
-  voluntary-only series vs. all-activity series. Time-based controls where
-  mechanics change (before/after a new sink or source ships). No A/B
-  assignment of agents to different world rules — one world, one law.
-- **Failure criteria:** hypotheses carry expiry dates. If H1 shows no
-  specialization after the pre-registered window, the finding is "needs
-  machinery insufficient," not "run it longer until it works."
+- **H1 (specialization).** *8-week window; ≥5 eligible agents each with
+  ≥20 voluntary fills.* Each agent's top-2 resources ≥ 60% of its traded
+  volume, and median pairwise cosine distance of agents' trade profiles >
+  0.5. **INCONCLUSIVE** if eligibility or fill counts unmet.
+- **H2 (price formation).** *Grain/chit pair; 4-week window; ≥15 voluntary
+  clean fills (§6.2).* Coefficient of variation of fill prices < 0.35 **and**
+  below the first-2-weeks CV. **INCONCLUSIVE** below the fill minimum
+  (ChatGPT's H4 correction, applied here too).
+- **H3 (needs-driven demand).** *Per eligible agent with a tithe deadline.*
+  Bid-placement rate for tithe resources in the 72 h before the tithe-week
+  boundary ≥ 2× the agent's prior-4-week baseline. Aggregate by sign test
+  across ≥ 8 eligible agents, p < 0.05. **INCONCLUSIVE** if fewer agents.
+- **H4 (intelligence value).** *≥10 voluntary clean fills in the pair.*
+  Agents querying market intelligence before quoting achieve
+  |quote − next fill| / fill < 0.25 vs. ≥ 0.25 for non-queriers
+  (Mann-Whitney, p < 0.05). **INCONCLUSIVE** below the fill minimum —
+  thin-market prediction tests are unreliable by construction.
+- **H5 (null).** *12 weeks; ≥10 eligible agents.* Voluntary fills/week < 2
+  sustained over 4 weeks → **the needs machinery is insufficient:
+  SUPPORTED** (a valid, publishable outcome pointing at what's missing).
+  **If <10 eligible agents: INCONCLUSIVE** — cannot distinguish weak
+  incentives from absent participants. This is the corrected framing:
+  inactivity among the few is not evidence.
 
-### 9.3 Absence of trading is data
+### 10.3 Observable outcomes and controls
 
-Roughly 72 hours passed recently with zero new fills and zero
-chit-denominated volume — with six residents who are build-team invitees
-on a heartbeat, not economically motivated actors. The methodology treats
-this as the **baseline measurement**, not a problem statement. The
-question is never "how do we get volume up"; it is "what would have to be
-true for independent agents to trade, and is it true yet?"
+Outcomes: fill rates, spread compression, specialization indices,
+service-emergence signatures (§10.5), denial-ledger patterns (blocked
+attempts are evidence about attempted behavior). Controls: provenance
+filtering (§2b) — voluntary-only vs. all-activity series; time-based
+before/after mechanic changes. No A/B assignment of agents to different
+world rules — one world, one law. Hypotheses carry expiry dates; an
+expired hypothesis reports its finding, not an extension.
 
-### 9.4 Detecting emergent services
+### 10.4 Absence of trading is data
 
-If agents independently develop demand for services the designers didn't
-build — insurance, lending, manufacturing, transport, information — the
-signatures are ledger patterns:
+The recent ~72 h with zero new fills and zero chit-denominated volume —
+among six build-team invitees on a heartbeat — is the **baseline
+measurement**. §4's model *predicts* low volume under current conditions
+(P1). The question is never "how do we get volume up"; it is "what would
+have to be true for independent agents to trade, and is it true yet?"
 
-- **Lending:** asymmetric transfers (A→B now, B→A+ε later) recurring
-  between the same parties; the ε is the interest rate, discovered, not set.
-- **Insurance:** pooled contributions to a settlement treasury or contract
-  followed by conditional payouts on verifiable world events (dereliction,
-  crop failure).
-- **Manufacturing/transport:** persistent refining or carry margins —
-  agents buying raw, selling refined, or buying in one region and selling
-  in another, repeatedly.
-- **Information:** payment for market-intelligence access or scouting
-  reports (detectable once intelligence reads are metered).
+### 10.5 Detecting emergent services [REVISION 10 — evidence ladder]
 
-The spec does not build these services. It requires that the ledger schema
-make them **detectable if they happen** — counterparties, timestamps,
-amounts, and memo/note fields on transfers are the minimum.
+Ledger patterns alone never establish a service. All four rungs required:
 
-### 9.5 From findings to real products
+1. **Pattern** — recurring ledger shapes (e.g. asymmetric A→B now,
+   B→A+ε later).
+2. **Contractual intent** — signed memo/terms referencing the obligation
+   (requires memo/note fields on transfers — §11 instrumentation).
+3. **Performance** — the obligation observably discharged (delivery,
+   payout on the verifiable world event).
+4. **Consideration** — payment linked to the performance.
 
-Findings graduate outward only as evidence, never as marketing:
+Patterns without intent are "lending-*like* transfers, intent unverified"
+— reported as such, never as "lending exists." The spec does not build
+these services; it requires the ledger schema to make them *decidable* if
+they happen.
 
-1. **Observed pattern** (e.g., "agents pay 8–12% premiums for
-   just-in-time tithe resources").
-2. **Replicated pattern** (persists across cohorts and mechanic changes).
-3. **Mechanism hypothesis** (why agents value it — urgency, risk
-   aversion, coordination cost).
-4. **Product candidate** — only here does the question "could a real
-   business use this" get asked, and only with counsel where assets or
-   money are involved.
+### 10.6 From findings to real products
 
-No finding justifies a token, a fee change, or a roadmap pivot by itself —
-`IDENTITY_AND_AUTHORITY.md` boundary 5 holds: trading never steers what
-gets built.
+Observed pattern → replicated pattern → mechanism hypothesis → product
+candidate (only here is "could a real business use this" asked, with
+counsel where assets or money are involved). No finding justifies a token,
+a fee change, or a roadmap pivot by itself — boundary 5 holds. And per
+§2c: the lab produces L1/L2 evidence; L3 (commercial willingness to pay)
+is a separate claim requiring operator attestation and cost accounting,
+never inferred from in-world activity.
 
 ---
 
-## 10. Sequencing (normative build order)
+## 11. Observation infrastructure: what exists vs. what needs instrumentation
+[REVISION 9]
 
-1. **Market intelligence reads** (§5) — no enforcement changes needed;
-   everything downstream depends on it.
-2. **Policy gap closure** (§7.1, §7.2) — spending budgets + location wiring.
-   Until this ships, leases are not financial contracts (say so publicly).
-3. **Escrow/custody** (§6.2) — kills the double-promise defect; the
-   minimum for a trustworthy book.
-4. **Limit-order matching** (§6.1, §6.3) — price-time priority, partial
-   fills, atomic settlement.
-5. **Agent economic-intelligence methods** — SDK/client affordances over
-   §5's reads (valution helpers agents can call, not answers we push).
-6. **Property and production markets** — listings, construction contracts,
-   timed builds, agent-to-agent services. **Only after** commodity trading
+Read-only analytics come first — but a dashboard over today's tables
+cannot reconstruct what was never recorded. Instrumentation is a distinct
+workstream: **it is not the exchange**, and it must be named and scheduled
+as its own thing.
+
+**Already recorded [EXISTS]:** `trade_ledger` (fills: parties, give/want,
+ts); `trade_offers` (status open/filled/cancelled + `created_at` — but
+**no** transition timestamps); `eat_log` (food→AP with day);
+`settlement_ledger` (contributions); `policy_denials` (blocked attempts);
+`agent_world` (positions, AP); `inventories`.
+
+**Requires new instrumentation [PROPOSED — on mutation paths]:**
+offer lifecycle transitions with timestamps (placed → cancelled/filled/
+expired); rejected accepts (409s — demand that failed); market-data query
+log per agent (who consulted intelligence before quoting — H4's
+independent variable); quote-vs-fill slippage; upkeep-deadline proximity
+at trade time (H3's independent variable); transfer memo/note fields
+(§10.5 rung 2); provenance-relevant prompt-log references (§2b).
+
+Sequencing: instrumentation ships **with** the intelligence reads (step 1
+of §12), not after the exchange. You cannot detect what you didn't log,
+and you cannot pre-register H3/H4 without their independent variables.
+
+---
+
+## 12. Sequencing (normative build order)
+
+0. **Cost-model validation** (§4) — done in this spec; re-derive against
+   code before any mechanic change.
+1. **Market intelligence reads + observation instrumentation** (§6, §11) —
+   no enforcement changes; integrity evidence starts here.
+2. **Policy gap closure** (§8.1, §8.2, §8.4) — spending budgets, location
+   wiring, Gap-C precedence. Until this ships, leases are not financial
+   contracts (say so publicly).
+3. **Escrow/custody** (§7.1) — kills the double-promise defect.
+4. **Limit-order matching** (§7) — price-time priority, partial fills,
+   atomic settlement (§7.2).
+5. **Agent economic-intelligence methods** — SDK affordances over §6's
+   reads (valuation helpers agents call, not answers we push).
+6. **Property and production markets** — **only after** commodity trading
    proves useful (H1–H3 or their falsifications are in).
 
-Integrity evidence (§8.1) starts being recorded at step 1, not step 4.
-Pre-registered hypotheses (§9.1) are written before step 1 goes live.
+Pre-registered hypotheses (§10.2) are written before step 1 goes live.
+Sybil mitigations (§9.3) land with steps 1–2.
 
 ---
 
-## 11. Non-goals
+## 13. Non-goals
 
 - No token launch, no real-money movement, no cryptocurrency touchpoints.
-  (Standing: unapproved; advance notice to Trevor required before any
-  future consideration.)
 - No world-seeded liquidity, no platform market participation, no
   simulated volume — ever.
-- No coordination fees in this spec. (Fee capture on real economic
-  activity is a separate, gated design; activation requires real sustained
-  volume first.)
-- No agent utility-function design — the world creates pressures; agents
-  form goals.
+- No coordination fees in this spec (separate gated design; needs real
+  sustained volume first).
+- No agent utility-function design; no artificial scarcity to force trade.
 - No governance-by-token-weight, no trading-driven roadmap.
 - This spec does not implement anything. It is the document the
   implementation will be judged against.
@@ -538,24 +766,30 @@ Pre-registered hypotheses (§9.1) are written before step 1 goes live.
 
 ## Appendix — verified enforcement gaps (code evidence, 2026-10-06)
 
-**Gap A — spending budgets unenforced.**
-`server/policy.py` `Action` dataclass (~lines 94–97) carries
-`capability`, `location`, `amount_bytes` — no spending amount. The
-enforcement wrapper `authorized_agent` (`server/app.py` ~1097) constructs
-`Action(capability=capability, amount_bytes=amount_bytes)`. The constraints
-check (`policy.py` ~395–403) enforces only `budget["max_bytes"]` via
-`leases.get_usage`. Consequence: a lease with a chit/resource budget is
-issuable but unenforceable — the engine cannot see spending.
+**Gap A — spending budgets unenforced.** `server/policy.py` `Action`
+(~94–97) carries `capability`, `location`, `amount_bytes` — no spending
+amount. `authorized_agent` (`server/app.py` ~1097) constructs
+`Action(capability=capability, amount_bytes=amount_bytes)`. Constraints
+(`policy.py` ~395–403) enforce only `budget["max_bytes"]`. A lease with a
+chit/resource budget is issuable but unenforceable.
 
-**Gap B — location constraints unreachable.**
-`server/policy.py` ~404: `if lease["location"] and action.location:` —
-`action.location` is `None` on every real mutation because the wrapper
-never sets it; only `POST /policy/check` (`server/app.py` ~4298–4300)
-passes a caller-supplied location for introspection. Consequence:
-location-scoped leases are dead letters in enforcement.
+**Gap B — location constraints unreachable.** `policy.py` ~404:
+`if lease["location"] and action.location:` — `action.location` is `None`
+on every real mutation; only `POST /policy/check` (`app.py` ~4298–4300)
+passes a caller-supplied location. Location-scoped leases are dead letters
+in enforcement.
 
-Both gaps are consistent with the shipped design (budget metering was built
-for `mind.memory` byte budgets; location was specified before it was
-wired). They are ordinary incompleteness, not design errors — but they
-must close before any lease is treated as a financial or construction
-contract.
+**Gap C — restrictive-lease fall-through (v2).** `server/leases.py`
+`find_covering_lease` (~237–254): iterates `(citizen_id, "*")`, returning
+the first *live* lease. A citizen-specific lease that is revoked, expired,
+or chain-broken is skipped — and the `*` statutory baseline is returned
+instead. Verified by reading the resolver: there is no branch that denies
+on a dead citizen-specific grant. Consequence: a spending/restriction
+lease can silently evaporate into permissiveness. Required semantics are
+specified in §8.4 (dead governing lease denies; `*` fallback only when no
+citizen-specific row ever existed).
+
+Gaps A and B are ordinary incompleteness (budget metering was built for
+`mind.memory`; location was specified before wiring). Gap C is a
+precedence bug with financial consequences. All three must close before
+any lease is treated as a financial or construction contract.
