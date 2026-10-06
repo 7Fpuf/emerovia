@@ -7,6 +7,7 @@ __pycache__/
 *.db-shm
 *.egg-info/
 server/operator.key
+world_authority.key
 server/*.log
 server/*.pid
 server/*.lock

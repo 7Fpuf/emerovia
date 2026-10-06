@@ -540,3 +540,168 @@ class Agent:
     def list_feasts(self) -> list:
         """Public list of active feast buffs."""
         return self._request("GET", "/world/feasts", signed=False)
+
+    # ---- policy engine v1: identity, authority, memory ------------------
+
+    @staticmethod
+    def _canonical(doc: dict) -> bytes:
+        return json.dumps(doc, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    def _sign_document(self, doc: dict) -> str:
+        """Sign a canonical policy document (card, lease, mandate)
+        with this agent's citizen key."""
+        return self._sk.sign(self._canonical(doc)).signature.hex()
+
+    def set_citizen_card(self, card: dict) -> dict:
+        """Present (or re-present) your citizen-signed Citizen Card.
+        Identity only — the card carries no authority."""
+        return self._request("POST", "/citizens/card",
+                             {"card": card, "signature": self._sign_document(card)})
+
+    def get_citizen_card(self, name: str) -> dict:
+        """Public: read a citizen's card."""
+        return self._request("GET", f"/citizens/{name}/card", signed=False)
+
+    def get_mandate(self, name: str) -> dict:
+        """Public: read a citizen's active mandate."""
+        return self._request("GET", f"/citizens/{name}/mandate", signed=False)
+
+    def attach_mandate(self, mandate: dict, issuer_signature: str) -> dict:
+        """Attach an issuer-signed mandate. Your request signature is
+        your acceptance; you can never sign your own mandate. The issuer
+        signs the normalized envelope — an SDK-holding issuer can produce
+        it via agent._sign_document(agent._mandate_envelope(mandate))."""
+        return self._request("POST", "/citizens/mandate",
+                             {"mandate": mandate, "signature": issuer_signature})
+
+    _MANDATE_ENVELOPE_FIELDS = (
+        "citizen", "issuer", "bounds", "issued_at", "expires_at",
+    )
+
+    def _mandate_envelope(self, mandate: dict) -> dict:
+        env = {}
+        for field in self._MANDATE_ENVELOPE_FIELDS:
+            value = mandate.get(field)
+            if field == "bounds" and isinstance(value, str):
+                value = json.loads(value)
+            env[field] = value
+        return env
+
+    def citizen_timeline(self, name: str, limit: int = 100) -> dict:
+        """Public unified chronological view over a citizen's world memory."""
+        return self._request("GET", f"/citizens/{name}/timeline",
+                             query={"limit": limit}, signed=False)
+
+    def issue_lease(self, lease: dict) -> dict:
+        """Issue a capability lease as its issuer (your key signs the
+        envelope). For sub-leases, include parent_lease_id and narrow
+        scope/budget/location/expiration; depth must be parent depth - 1."""
+        return self._request("POST", "/leases/issue",
+                             {"lease": lease,
+                              "signature": self._sign_document(
+                                  self._lease_envelope(lease))})
+
+    # The server verifies the signature over exactly these fields,
+    # JSON-normalized (mirrors server/leases.py ENVELOPE_FIELDS).
+    _LEASE_ENVELOPE_FIELDS = (
+        "lease_id", "issuer", "citizen", "capability", "scope", "budget",
+        "location", "expiration", "delegation_depth", "revocation",
+        "parent_lease_id", "issued_at",
+    )
+
+    def _lease_envelope(self, lease: dict) -> dict:
+        env = {}
+        for field in self._LEASE_ENVELOPE_FIELDS:
+            value = lease.get(field)
+            if field in ("scope", "budget", "revocation") and isinstance(value, str):
+                value = json.loads(value) if value else ({} if field != "budget" else None)
+            if field == "location" and isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except (ValueError, TypeError):
+                    pass
+            env[field] = value
+        return env
+
+    def revoke_lease(self, lease_id: str) -> dict:
+        """Revoke a lease you issued (propagates down the delegation chain)."""
+        return self._request("POST", f"/leases/{lease_id}/revoke", {})
+
+    def list_leases(self, citizen: str | None = None,
+                    capability: str | None = None,
+                    include_inactive: bool = False) -> list:
+        """Public lease registry query."""
+        query = {"include_inactive": include_inactive}
+        if citizen is not None:
+            query["citizen"] = citizen
+        if capability is not None:
+            query["capability"] = capability
+        return self._request("GET", "/leases", query=query, signed=False)
+
+    def get_lease(self, lease_id: str) -> dict:
+        return self._request("GET", f"/leases/{lease_id}", signed=False)
+
+    def list_capabilities(self) -> list:
+        """Public capability catalog (namespaces, open/chartered/closed)."""
+        return self._request("GET", "/capabilities", signed=False)
+
+    def get_capability(self, name: str) -> dict:
+        return self._request("GET", f"/capabilities/{name}", signed=False)
+
+    def policy_check(self, capability: str, location: str | None = None,
+                     amount_bytes: int | None = None) -> dict:
+        """Dry-run the Policy Engine: would this action be allowed?
+        Decides without executing or logging."""
+        body = {"capability": capability}
+        if location is not None:
+            body["location"] = location
+        if amount_bytes is not None:
+            body["amount_bytes"] = amount_bytes
+        return self._request("POST", "/policy/check", body)
+
+    def policy_denials(self, limit: int = 100) -> list:
+        """Public ledger of policy denials."""
+        return self._request("GET", "/policy/denials",
+                             query={"limit": limit}, signed=False)
+
+    def policy_authority(self) -> dict:
+        """The world authority's identity and public key."""
+        return self._request("GET", "/policy/authority", signed=False)
+
+    def mind_write(self, text: str, kind: str = "fact",
+                   key: str | None = None, tags: list | None = None,
+                   idempotency_key: str | None = None) -> dict:
+        """Store a mind-memory entry. Private to your key; byte-budgeted
+        against your mind.memory lease."""
+        body = {"kind": kind, "text": text}
+        if key is not None:
+            body["key"] = key
+        if tags is not None:
+            body["tags"] = tags
+        return self._request("POST", "/mind/entries", body,
+                             idempotency_key=idempotency_key)
+
+    def mind_list(self, kind: str | None = None, tag: str | None = None,
+                  q: str | None = None, limit: int = 100) -> list:
+        """Recall your own mind-memory entries (private)."""
+        query = {"limit": limit}
+        if kind is not None:
+            query["kind"] = kind
+        if tag is not None:
+            query["tag"] = tag
+        if q is not None:
+            query["q"] = q
+        return self._request("GET", "/mind/entries", query=query)
+
+    def mind_update(self, entry_id: int, text: str,
+                    tags: list | None = None) -> dict:
+        """Versioned update: the old version is archived, never silently
+        mutated."""
+        body = {"text": text}
+        if tags is not None:
+            body["tags"] = tags
+        return self._request("PUT", f"/mind/entries/{entry_id}", body)
+
+    def mind_delete(self, entry_id: int) -> dict:
+        """Forget fully: the entry and its version history are deleted."""
+        return self._request("DELETE", f"/mind/entries/{entry_id}")
