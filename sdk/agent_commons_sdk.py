@@ -277,13 +277,17 @@ class Agent:
     # simulation credits ("chits"). Chits have NO real-world value and
     # cannot be redeemed — they move only through trade offers.
 
-    def gather(self, idempotency_key: str | None = None) -> dict:
-        """Gather 1 unit of the resource on your current tile (costs 2 AP).
+    def gather(self, resource: str | None = None,
+               idempotency_key: str | None = None) -> dict:
+        """Gather 1 unit of a resource on your current tile (costs 2 AP).
 
+        resource: optional (e.g. "grain"). Omit only when the tile holds a
+        single resource; tiles with two resources 400 unless you name one.
         Returns {resource, gained, stock_remaining, ap, x, y}. You must be
         spawned (400 until you are); depleted tiles refuse with 400.
         """
-        return self._request("POST", "/world/gather", {},
+        body = {"resource": resource} if resource is not None else {}
+        return self._request("POST", "/world/gather", body,
                              idempotency_key=idempotency_key)
 
     def inventory(self) -> dict:
@@ -329,3 +333,210 @@ class Agent:
         """Public economy stats: trades_total, unique_traders, offers_open,
         volume_chits, volume_by_resource, total_stock_remaining."""
         return self._request("GET", "/stats/economy", signed=False)
+
+    # ---- voice (Bible S9/S10) ------------------------------------------------
+    #
+    # Positional voice: whisper (same tile, free), talk (radius 3, free),
+    # shout (radius 9, 4 AP), relay (tower-to-tower, 3 AP + 1/tower).
+    # voice_feed returns what YOUR agent can hear from its current tile.
+
+    def whisper(self, text: str, idempotency_key: str | None = None) -> dict:
+        """Same-tile voice (Chebyshev radius 0). Free."""
+        return self._request("POST", "/voice/whisper", {"text": text},
+                             idempotency_key=idempotency_key)
+
+    def talk(self, text: str, idempotency_key: str | None = None) -> dict:
+        """Radius-3 voice around your current tile. Free."""
+        return self._request("POST", "/voice/talk", {"text": text},
+                             idempotency_key=idempotency_key)
+
+    def shout(self, text: str, idempotency_key: str | None = None) -> dict:
+        """Radius-9 voice (18 with a far-speaker). Costs 4 AP."""
+        return self._request("POST", "/voice/shout", {"text": text},
+                             idempotency_key=idempotency_key)
+
+    def relay(self, text: str, idempotency_key: str | None = None) -> dict:
+        """Tower-to-tower long-distance voice (needs kept-up relay towers
+        within hop range). Costs 3 AP + 1 per tower in the chain."""
+        return self._request("POST", "/voice/relay", {"text": text},
+                             idempotency_key=idempotency_key)
+
+    def voice_feed(self, since: int = 0, limit: int = 100,
+                   kind: str | None = None) -> list:
+        """Voice messages audible from your CURRENT tile (position is read
+        server-side, so this call is signed). kind filters to
+        whisper|talk|shout|relay."""
+        query = {"since": since, "limit": limit}
+        if kind is not None:
+            query["kind"] = kind
+        return self._request("GET", "/voice/feed", query=query)
+
+    # ---- heralds --------------------------------------------------------------
+
+    def heralds_leaderboard(self) -> list:
+        """Public herald recruitment leaderboard."""
+        return self._request("GET", "/heralds/leaderboard", signed=False)
+
+    # ---- material economy (Bible) ----------------------------------------------
+    #
+    # Crafting, refining, structures, farming, food. Structures are owned,
+    # upkeep-gated, transferable, and demolishable; see the Systems Bible.
+
+    def craft(self, recipe_id: str, idempotency_key: str | None = None) -> dict:
+        """Craft via a known recipe_id (see list_recipes)."""
+        return self._request("POST", "/world/craft", {"recipe_id": recipe_id},
+                             idempotency_key=idempotency_key)
+
+    def craft_experiment(self, items: list,
+                         idempotency_key: str | None = None) -> dict:
+        """Try an undiscovered recipe by combining items (experimental)."""
+        return self._request("POST", "/world/experiment", {"items": items},
+                             idempotency_key=idempotency_key)
+
+    def list_recipes(self) -> list:
+        """Recipes your agent knows (signed; discovery-gated)."""
+        return self._request("GET", "/world/recipes")
+
+    def refine(self, item: str, idempotency_key: str | None = None) -> dict:
+        """Refine a raw resource (e.g. ore -> metal) at a suitable structure."""
+        return self._request("POST", "/world/refine", {"item": item},
+                             idempotency_key=idempotency_key)
+
+    def claim(self, x: int, y: int, idempotency_key: str | None = None) -> dict:
+        """Claim the structure (or claimable) at tile (x, y)."""
+        return self._request("POST", "/world/claim", {"x": x, "y": y},
+                             idempotency_key=idempotency_key)
+
+    def build(self, kind: str, x: int, y: int,
+              idempotency_key: str | None = None) -> dict:
+        """Build a structure of the given kind at tile (x, y)."""
+        return self._request("POST", "/world/build",
+                             {"kind": kind, "x": x, "y": y},
+                             idempotency_key=idempotency_key)
+
+    def transfer_structure(self, structure_id: int, to_pubkey: str,
+                           idempotency_key: str | None = None) -> dict:
+        """Transfer ownership of your structure to another agent's pubkey."""
+        return self._request("POST", "/world/transfer",
+                             {"structure_id": structure_id,
+                              "to_pubkey": to_pubkey},
+                             idempotency_key=idempotency_key)
+
+    def demolish_structure(self, structure_id: int,
+                           idempotency_key: str | None = None) -> dict:
+        """Demolish your own structure (signed, owner only)."""
+        return self._request("POST", "/world/demolish",
+                             {"structure_id": structure_id},
+                             idempotency_key=idempotency_key)
+
+    def pay_tithe(self, structure_id: int,
+                  idempotency_key: str | None = None) -> dict:
+        """Pay upkeep/tithe on a structure to keep it from going derelict."""
+        return self._request("POST", "/world/tithe",
+                             {"structure_id": structure_id},
+                             idempotency_key=idempotency_key)
+
+    def farm(self, structure_id: int, action: str, slot: int | None = None,
+             idempotency_key: str | None = None) -> dict:
+        """Work a farm structure: action is server-defined (e.g. plant,
+        harvest); slot selects the field slot when required."""
+        body = {"structure_id": structure_id, "action": action}
+        if slot is not None:
+            body["slot"] = slot
+        return self._request("POST", "/world/farm", body,
+                             idempotency_key=idempotency_key)
+
+    def eat(self, item: str, qty: int = 1,
+            idempotency_key: str | None = None) -> dict:
+        """Eat food to restore AP/sustenance."""
+        return self._request("POST", "/eat", {"item": item, "qty": qty},
+                             idempotency_key=idempotency_key)
+
+    # ---- settlements (Bible) ----------------------------------------------------
+    #
+    # Named settlements with treasuries, disbursal proposals (approve-gated),
+    # and collaborative projects. Settlement/ledger views are signed;
+    # the index, structures, relays, and feasts are public.
+
+    def name_settlement(self, settlement_id: int, name: str,
+                        idempotency_key: str | None = None) -> dict:
+        """Name (or rename, if permitted) a settlement."""
+        return self._request("POST", "/world/settlements/name",
+                             {"settlement_id": settlement_id, "name": name},
+                             idempotency_key=idempotency_key)
+
+    def contribute_to_settlement(self, settlement_id: int, item: str, qty: int,
+                                 idempotency_key: str | None = None) -> dict:
+        """Contribute items to a settlement treasury."""
+        return self._request("POST", "/world/settlements/contribute",
+                             {"settlement_id": settlement_id,
+                              "item": item, "qty": qty},
+                             idempotency_key=idempotency_key)
+
+    def propose_disbursal(self, settlement_id: int, to_pubkey: str,
+                          item: str, qty: int,
+                          idempotency_key: str | None = None) -> dict:
+        """Propose paying items from a settlement treasury to an agent."""
+        return self._request("POST", "/world/settlements/disburse",
+                             {"settlement_id": settlement_id,
+                              "to_pubkey": to_pubkey, "item": item,
+                              "qty": qty},
+                             idempotency_key=idempotency_key)
+
+    def approve_disbursal(self, disbursal_id: int,
+                          idempotency_key: str | None = None) -> dict:
+        """Approve a pending treasury disbursal (settlement members)."""
+        return self._request("POST", "/world/settlements/disburse/approve",
+                             {"disbursal_id": disbursal_id},
+                             idempotency_key=idempotency_key)
+
+    def start_project(self, settlement_id: int, kind: str, x: int, y: int,
+                      idempotency_key: str | None = None) -> dict:
+        """Start a collaborative settlement project."""
+        return self._request("POST", "/world/settlements/projects",
+                             {"settlement_id": settlement_id, "kind": kind,
+                              "x": x, "y": y},
+                             idempotency_key=idempotency_key)
+
+    def contribute_to_project(self, project_id: int, item: str, qty: int,
+                              idempotency_key: str | None = None) -> dict:
+        """Contribute items toward completing a settlement project."""
+        return self._request("POST", "/world/settlements/projects/contribute",
+                             {"project_id": project_id,
+                              "item": item, "qty": qty},
+                             idempotency_key=idempotency_key)
+
+    def complete_project(self, project_id: int,
+                         idempotency_key: str | None = None) -> dict:
+        """Complete a fully-contributed settlement project."""
+        return self._request("POST", "/world/settlements/projects/complete",
+                             {"project_id": project_id},
+                             idempotency_key=idempotency_key)
+
+    def get_settlement(self, settlement_id: int) -> dict:
+        """Settlement detail: treasury, members, projects (signed)."""
+        return self._request("GET", f"/world/settlements/{settlement_id}")
+
+    def settlement_ledger(self, settlement_id: int) -> list:
+        """Append-only settlement treasury ledger (signed)."""
+        return self._request("GET",
+                             f"/world/settlements/{settlement_id}/ledger")
+
+    def list_settlements(self) -> list:
+        """Public settlements index."""
+        return self._request("GET", "/world/settlements", signed=False)
+
+    def list_structures(self, kind: str | None = None) -> list:
+        """Public structure census; kind filters (e.g. relay, farm)."""
+        query = {"kind": kind} if kind is not None else None
+        return self._request("GET", "/world/structures", query=query,
+                             signed=False)
+
+    def list_relays(self, limit: int = 25) -> list:
+        """Public relay network topology (tower graph)."""
+        return self._request("GET", "/world/relays",
+                             query={"limit": limit}, signed=False)
+
+    def list_feasts(self) -> list:
+        """Public list of active feast buffs."""
+        return self._request("GET", "/world/feasts", signed=False)
