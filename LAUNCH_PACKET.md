@@ -48,30 +48,64 @@ the band: no robust mutual-gain claim survives summer
 (`test_summer_counterfactual_wild_margin_kills_trade`). Winter prices
 the wild margin out (48 AP).
 
-## 2. Runner revision + dry-run results
+## 2. Runner revision + verification results
 
 - **Runner:** `tools/phase2_runner.py`,
-  `HARNESS_VERSION = phase2-runner/0.1.0-preflight`.
+  `HARNESS_VERSION = phase2-runner/0.1.0` (was 0.1.0-preflight).
 - **Loop:** GET state → prompt pinned model → parse exactly ONE action
-  → ed25519-sign + POST → JSONL log (timestamp, state, token counts,
-  action, HTTP status, AP/inventory deltas, stated reasoning). Temp-DB
-  world only; no experimenter input after start except §3.6 technical
-  intervention.
+  → ed25519-sign + POST → evidence archive (temp-DB world only; no
+  experimenter input after start except §3.6 technical intervention).
 - **Wait semantics:** `wait` sets a wake timestamp — zero model calls
   until then, 15-minute wake-checks (state re-read, logged, no
   inference). Farm cycles are 2h real-time; the 6h window fits the
   agents' production plans.
-- **Dry-run verified** (scripted stub adapter, zero real inference):
+- **Real pinned-model adapter** (`PinnedModelAdapter`,
+  `muse-spark-1.3`): endpoint + key from `PHASE2_MODEL_API_URL` /
+  `PHASE2_MODEL_API_KEY`. Non-dry-run without them **exits 2 at
+  startup** — the scripted stub is dry-run-only, never a silent
+  fallback. Assumed shape: OpenAI-compatible chat-completions
+  (re-verify at launch; only the mapping class changes if different).
+- **Hard budget enforcement at the API boundary:**
+  - Prompt estimated > 6,000 tokens → rejected BEFORE sending
+    (nothing billed).
+  - `max_tokens=500` set on every request (API-side output cap).
+  - Billed `usage` accounted at face value — never estimated, never
+    clipped. Missing usage → refuse; billed over caps →
+    `BilledCapAnomaly` → technical-stop halt.
+  - $4.00 cap: worst-case next-call cost checked before every call;
+    billed spend re-checked after every call. Both halt as technical
+    stops.
+  - Action cap counts every signed attempt (200/400/409/transport
+    errors); unknown actions and waits do not. Per-agent `tick_seq`
+    contiguous over signed attempts.
+- **Observation pipeline** (protocol §7): prompts carry `/world/me` +
+  inventory, `/world/info` (season/day/multipliers), disclosed map
+  window (radius 6), own structures incl. farm slot states, public
+  recipes, agent list, open offers, recent filled trades, recent chat.
+  Sections priority-fitted under the 6k token cap; core state never
+  dropped.
+- **Evidence archive** (`--archive DIR`): `run.jsonl` (tick + budget +
+  provenance events), `snapshots/start.json` + `snapshots/end.json`,
+  `ledger.json`, `budget.json`, `world_end.db`, `runner_state.json`,
+  `agent_keys.json` (experiment-only temp keys), `manifest.json`
+  (SHA-256 of every file + brief SHAs + config). `--verify-archive`
+  checks hashes, log integrity, budget reconciliation, DB-vs-snapshot
+  match. `--resume` restores world/spend/keys (briefs re-verified
+  frozen) and continues.
+- **Verified** (offline + stub-based acceptance tests, zero real
+  inference — see `tests/test_phase2_readiness.py`, 19/19):
   1. Full tick pipeline with 201/200/400 paths recorded;
   2. `technical_stop: budget_cap_reached` with 0 model calls at a
      $0.000001 cap;
-  3. `agent_done: action_cap_reached` at exactly 2/2 with
-     `--max-actions 2`;
+  3. `agent_done: action_cap_reached` (failed attempts counted);
   4. `run_start` commits harness version, model, brief SHAs, dollar
-     cap, token caps before any tick.
-- **Remaining before a real run:** swap the stub adapter for the
-  pinned-model API adapter; recompute the dollar cap from
-  then-current published rates.
+     cap, token caps before any tick;
+  5. Full dry-run → `--verify-archive` → `--resume` → verify cycle
+     passes; adapter fail-loud behavior verified.
+- **Remaining before a real run:** set `PHASE2_MODEL_API_URL` /
+  `PHASE2_MODEL_API_KEY`, re-verify the endpoint response shape with
+  one mocked call, recompute the dollar cap from then-current
+  published rates. See `READINESS_CERTIFICATE.md`.
 
 ## 3. Frozen briefs (SHA-256, blind)
 
@@ -129,7 +163,9 @@ discover unanticipated trades — legitimate outcomes, not failures.
 
 1. ✅ Phase 1 corrections (three rounds) — executed, 479/479 tests,
    44/44 harness checks.
-2. ✅ Final preflight (this packet) — runner built, dry-run verified.
+2. ✅ Final preflight + operational readiness — runner 0.1.0 built,
+   real pinned-model adapter, hard budget enforcement, complete
+   observation pipeline + evidence archive; see READINESS_CERTIFICATE.md.
 3. ⬜ ChatGPT independent review of this packet.
 4. ⬜ **Trevor's explicit approval** — the single decision: run or don't.
 5. ⬜ Only then: execute exactly per protocol, publish run log +

@@ -388,7 +388,33 @@ worlds. Verified:
    both brief SHA-256 hashes, dollar cap, and token caps before any
    tick.
 
-No behavioral experiment was launched. The runner is ready; the only
-remaining step before a real run is swapping the stub adapter for
-the pinned-model API adapter and recomputing the dollar cap from
-then-current rates.
+### 7.2 Final operational readiness (2026-10-06, no launch)
+
+ChatGPT's final gate review accepted the economics, blind briefs, and
+methodology; three operational gaps were closed (see
+`READINESS_CERTIFICATE.md`; runner `phase2-runner/0.1.0`):
+
+1. **Real pinned-model adapter** (`PinnedModelAdapter`,
+   `muse-spark-1.3`): endpoint + key from `PHASE2_MODEL_API_URL` /
+   `PHASE2_MODEL_API_KEY`. Non-dry-run without them exits 2 at
+   startup — the scripted stub is dry-run-only, never a silent
+   fallback.
+2. **Hard budget enforcement at the API boundary:** pre-send
+   rejection of oversize prompts; `max_tokens=500` on every request;
+   real billed `usage` accounted at face value (never clipped);
+   $4.00 cap checked before AND after every call (both halt as
+   technical stops); action cap counts every signed attempt
+   (200/400/409/transport errors).
+3. **Complete observation pipeline + evidence archive:** prompts
+   carry all ordinary public world info (§7 list, priority-fitted
+   under 6k tokens); archives hold tick/budget/provenance logs,
+   start/end world snapshots, full ledger, `world_end.db`, and a
+   SHA-256 manifest. `--verify-archive` and `--resume` verified via
+   stub-based acceptance tests (`tests/test_phase2_readiness.py`,
+   19/19; full suite 498/498; harness 44/44).
+
+Remaining before a real run: set the endpoint env vars, re-verify the
+response shape, recompute the dollar cap from current rates — then
+ChatGPT's review and Trevor's explicit approval (protocol §6).
+
+No behavioral experiment was launched. The pilot is ON HOLD.
