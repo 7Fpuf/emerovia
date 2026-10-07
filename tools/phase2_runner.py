@@ -72,7 +72,7 @@ PINNED_MODEL = "muse-spark-1.3"
 RATE_IN_PER_M = 1.25
 RATE_OUT_PER_M = 4.25
 
-HARNESS_VERSION = "phase2-runner/0.1.0"
+HARNESS_VERSION = "phase2-runner/0.1.1"
 
 ENV_API_URL = "PHASE2_MODEL_API_URL"
 ENV_API_KEY = "PHASE2_MODEL_API_KEY"
@@ -100,7 +100,18 @@ class BilledCapAnomaly(RuntimeError):
 
 
 class ModelAPIError(RuntimeError):
-    """Transport- or API-level failure talking to the model endpoint."""
+    """Transport- or API-level failure talking to the model endpoint.
+
+    Billing status is UNKNOWN: the request may have been received and
+    billed before the error/timeout occurred. The runner treats this as
+    a fail-closed condition (technical stop), never a retry."""
+
+
+class UncertainBillingHalt(RuntimeError):
+    """Internal marker: the run stopped because a model-API failure left
+    billing uncertain. Recorded as a technical_stop with reason
+    'uncertain_model_billing' plus an unknown-spend record in
+    budget.json."""
 
 
 # --------------------------------------------------------------------------
@@ -207,7 +218,18 @@ class PinnedModelAdapter(ModelAdapter):
       billed tokens, never estimates. Missing usage -> ModelAPIError.
     - Billed usage above either per-tick cap -> BilledCapAnomaly
       (the run must halt; the budget math is untrustworthy).
-    """
+    - Any transport/API failure -> ModelAPIError. Billing is then
+      UNKNOWN (a timeout or 5xx may have been processed server-side),
+      so the runner FAILS CLOSED (technical stop, unknown-spend
+      recorded) rather than retrying blindly.
+
+    Defense in depth beyond this class (launch-handoff operator step):
+    in the provider's billing console, put a hard spend limit / budget
+    alert at or below the experiment cap on a DEDICATED experiment API
+    key before launch, and never reuse a general-purpose key for the
+    pilot. The runner's in-code $4 cap is the primary safeguard; the
+    provider-side limit is the backstop. Console steps are provider-
+    specific — verify them at launch, do not assume a UI path."""
 
     name = "pinned-muse-spark-1.3-api"
     enforces_limits = True
@@ -297,6 +319,13 @@ def build_adapter(dry_run: bool) -> ModelAdapter:
     return PinnedModelAdapter()
 
 
+# Phase 2 stockpile objectives (protocol §3): both agents must END
+# holding at least these amounts. Verified from the world DB, never
+# from stated claims.
+OBJECTIVE_IRON = 10
+OBJECTIVE_FLOUR = 16
+
+
 # --------------------------------------------------------------------------
 # Config
 
@@ -344,6 +373,10 @@ class Phase2Runner:
         self.spend_out = 0
         self.model_calls = 0
         self.budget_calls: list[dict] = []
+        # Fail-closed billing records: each entry is an event where a
+        # model-API failure left spend UNKNOWN (may have been billed).
+        # Preserved in budget.json; the run stops at the first one.
+        self.uncertain_billing: list[dict] = []
         # test-module helpers (single source of truth for mechanics)
         import test_econ_validation_phase1 as T
         self.T = T
@@ -361,6 +394,33 @@ class Phase2Runner:
     def dollars(self) -> float:
         return (self.spend_in / 1e6 * RATE_IN_PER_M
                 + self.spend_out / 1e6 * RATE_OUT_PER_M)
+
+    def objectives_complete(self) -> dict | None:
+        """Check the Phase 2 stockpile objectives against the
+        AUTHORITATIVE world DB: every agent holds >= OBJECTIVE_IRON
+        iron AND >= OBJECTIVE_FLOUR flour. Returns the per-agent
+        inventory evidence, or None if any agent is short. Never
+        trusts stated claims — only verified world state."""
+        if not self.agents or not self.db_path:
+            return None
+        evidence = {}
+        for a in self.agents:
+            inv = self.T.inventory_of(self.db_path, a["pk"])
+            iron = inv.get("iron", 0)
+            flour = inv.get("flour", 0)
+            evidence[a["name"]] = {"iron": iron, "flour": flour}
+            if iron < OBJECTIVE_IRON or flour < OBJECTIVE_FLOUR:
+                return None
+        return evidence
+
+    def log_objectives_complete(self, evidence: dict):
+        self.log({"event": "run_objectives_complete",
+                  "inventories": evidence,
+                  "objectives": {"iron": OBJECTIVE_IRON,
+                                 "flour": OBJECTIVE_FLOUR},
+                  "ticks": self.ticks,
+                  "model_calls": self.model_calls,
+                  "spend_dollars": round(self.dollars(), 4)})
 
     # -- world setup --------------------------------------------------
     def _attach_client(self):
@@ -639,6 +699,12 @@ class Phase2Runner:
                 "in_tokens": self.spend_in,
                 "out_tokens": self.spend_out,
                 "spend_dollars": round(self.dollars(), 4)},
+            # Fail-closed billing records: model-API failures whose
+            # spend could not be determined. Each one halted the run;
+            # preserved here so no possible charge goes unrecorded.
+            "uncertain_billing": {
+                "count": len(self.uncertain_billing),
+                "events": self.uncertain_billing},
         }
         self._write_json("budget.json", budget)
         shutil.copy2(self.db_path, self.archive_dir / "world_end.db")
@@ -680,22 +746,23 @@ class Phase2Runner:
                 "dry_run": self.cfg.dry_run},
             "files": {},
         }
-        # run_end is logged BEFORE the manifest is hashed: run.jsonl
-        # is the live log, so it is covered by the line-parse check in
-        # verify_archive, not by a manifest hash (which could never be
-        # computed after the final append).
+        # run_end is logged FIRST, then the log file is CLOSED: no
+        # further appends are possible, so run.jsonl's hash is stable
+        # and it joins the manifest like every other evidence file.
+        # The action log is the experiment's central evidence record —
+        # verify_archive checks it against this hash.
         self.log({"event": "run_end", "reason": reason,
                   "ticks": self.ticks,
                   "spend_dollars": round(self.dollars(), 4),
                   "model_calls": self.model_calls,
                   "actions": {a["name"]: a["actions"] for a in self.agents}})
         self.logf.flush()
+        self.logf.close()
         for p in sorted(self.archive_dir.rglob("*")):
-            if p.is_file() and p.name not in ("manifest.json", "run.jsonl"):
+            if p.is_file() and p.name != "manifest.json":
                 manifest["files"][p.relative_to(self.archive_dir).as_posix()] = \
                     sha256_file(p)
         self._write_json("manifest.json", manifest)
-        self.logf.close()
 
     # -- budget ---------------------------------------------------------
     def check_budget_before_call(self) -> bool:
@@ -836,7 +903,24 @@ class Phase2Runner:
                       "reason": "billed_token_anomaly",
                       "detail": str(e)[:200]})
             return "halt"
-        except Exception as e:  # ModelAPIError and friends: transient
+        except ModelAPIError as e:
+            # FAIL CLOSED: billing is unknown — the request may have
+            # been processed and charged before the error/timeout.
+            # Retrying blindly could breach the $4 cap, so the run
+            # STOPS. The unknown-spend record is preserved in
+            # budget.json (see finalize_archive). This is never an
+            # economic finding.
+            self.uncertain_billing.append({
+                "ts": time.time(), "agent": agent["name"],
+                "error": f"{type(e).__name__}: {e}"[:300],
+                "spend_dollars_at_halt": round(self.dollars(), 4),
+                "model_calls_at_halt": self.model_calls})
+            self.log({"event": "technical_stop",
+                      "reason": "uncertain_model_billing",
+                      "agent": agent["name"],
+                      "detail": str(e)[:200]})
+            return "halt"
+        except Exception as e:  # non-API adapter errors: transient
             self.log({"event": "tick_error", "agent": agent["name"],
                       "error": f"{type(e).__name__}: {e}"[:200]})
             return "ok"
@@ -902,6 +986,13 @@ class Phase2Runner:
             while self.ticks < tick_budget:
                 all_capped = True
                 for agent in self.agents:
+                    # Objective completion: stop spending inference the
+                    # moment both stockpiles are verified complete.
+                    done = self.objectives_complete()
+                    if done is not None:
+                        self.log_objectives_complete(done)
+                        reason = "objectives_complete"
+                        return
                     st = self.tick(agent)
                     if st == "halt":
                         reason = "halt"
@@ -968,8 +1059,10 @@ class Phase2Runner:
         runner.spend_in = state["spend_in"]
         runner.spend_out = state["spend_out"]
         runner.model_calls = state["model_calls"]
-        # Rebuild the per-call budget ledger from the archived log so
-        # the final budget.json reconciles with restored totals.
+        # Rebuild the per-call budget ledger and the fail-closed
+        # billing records from the archived artifacts so the final
+        # budget.json reconciles with restored totals and no
+        # unknown-spend record is lost across a resume.
         for line in (archive_dir / "run.jsonl").read_text().splitlines():
             line = line.strip()
             if not line:
@@ -980,6 +1073,13 @@ class Phase2Runner:
                 continue
             if ev.get("event") == "budget_record":
                 runner.budget_calls.append(ev)
+        try:
+            _bj = json.loads(
+                (archive_dir / "budget.json").read_text())
+            runner.uncertain_billing = list(
+                _bj.get("uncertain_billing", {}).get("events", []))
+        except (OSError, json.JSONDecodeError):
+            runner.uncertain_billing = []
         runner._world_ready = True
         for astate in state["agents"]:
             name = astate["name"]
@@ -1094,6 +1194,11 @@ def verify_archive(archive_dir: Path) -> dict:
         check("budget_dollars_recompute",
               abs(expect_d - tot.get("spend_dollars", -1)) < 1e-9,
               f"recomputed {expect_d}")
+        ub = b.get("uncertain_billing")
+        check("budget_has_uncertain_billing_block",
+              isinstance(ub, dict) and isinstance(ub.get("events"), list)
+              and ub.get("count") == len(ub["events"]),
+              "missing or malformed uncertain_billing block")
     else:
         check("budget_json_present", False)
     for which in ("start", "end"):

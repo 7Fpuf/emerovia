@@ -12,8 +12,9 @@ accepted in that review and are NOT reopened here.
 ## 1. Exact runnable command + commit
 
 - **Branch:** `review/economic-infrastructure-spec`
-- **Commit:** `3d40c0f6` + this certificate's commit (see GitHub)
-- **Runner:** `tools/phase2_runner.py`, `HARNESS_VERSION = phase2-runner/0.1.0`
+- **Frozen commit:** this certificate's commit (see §7; code frozen —
+  no code changes after this commit, docs-only SHA record excepted)
+- **Runner:** `tools/phase2_runner.py`, `HARNESS_VERSION = phase2-runner/0.1.1`
 - **Dry-run (zero inference):**
   `PHASE2_MODEL_API_URL` / `PHASE2_MODEL_API_KEY` NOT required.
   ```
@@ -65,6 +66,26 @@ accepted in that review and are NOT reopened here.
   (transport errors count conservatively: may have executed).
   Unknown actions (never sent) and `wait` do not count. Per-agent
   `tick_seq` is contiguous over signed attempts (evidence chain).
+- **Fail closed on uncertain billing (release safeguard):** if a model
+  request may have been billed but returns an error, missing/ambiguous
+  usage, or times out, the runner STOPS as a `technical_stop`
+  (`uncertain_model_billing`) — it never retries blindly against the
+  $4 cap. The unknown-spend record (agent, error, spend/calls at halt)
+  is preserved in `budget.json` under `uncertain_billing` and survives
+  resume. `TokenLimitExceeded` is explicitly NOT a halt: the request
+  was definitely never sent, so ticking on is safe. Verified by
+  `test_uncertain_billing_halts_run_no_retry`,
+  `test_missing_usage_also_halts_run`,
+  `test_pre_send_limit_rejection_still_continues`,
+  `test_uncertain_billing_preserved_in_budget_json`, and
+  `test_uncertain_billing_survives_resume`.
+- **Provider-side backstop (launch-handoff operator step):** in the
+  provider's billing console, set a hard spend limit / budget alert at
+  or below the experiment cap on a DEDICATED experiment API key before
+  launch; never reuse a general-purpose key. The runner's in-code $4
+  cap is the primary safeguard; the provider-side limit is defense in
+  depth. Console steps are provider-specific — verify at launch, do
+  not assume a UI path.
 - Pinned rates $1.25/$4.25 per M (standard tier); pre-registered cap
   $4.00 covers the $3.85 theoretical max (≤400 calls, ≤6k/≤500
   per tick). Token caps bind regardless of rates.
@@ -88,6 +109,22 @@ accepted in that review and are NOT reopened here.
   (per-call records + totals + cap), `world_end.db` (world copy),
   `runner_state.json`, `agent_keys.json` (experiment-only temp keys),
   `manifest.json` (SHA-256 of every file + brief SHAs + config).
+  **Release safeguard:** `run.jsonl` — the central action log — is now
+  finalized (log closed, no further appends) before hashing and is
+  included in the manifest like every other evidence file;
+  `--verify-archive` checks it against the recorded SHA-256. A forged
+  or appended line fails verification. Verified by
+  `test_run_jsonl_hash_in_manifest_and_verified` and
+  `test_tampered_run_jsonl_fails_verification`.
+- **Objective completion stop (release safeguard):** `run()` checks
+  before every tick whether both agents hold ≥10 iron AND ≥16 flour,
+  verified from the authoritative world DB (never from stated
+  claims). When complete, it records `run_objectives_complete` with
+  the per-agent inventories and stops — zero further inference is
+  spent after the objective is achieved. Verified by
+  `test_objectives_complete_stops_run_without_spend` (zero ticks,
+  zero model calls), `test_objectives_incomplete_keeps_running`, and
+  `test_objectives_not_trusted_from_claims`.
 - **Recovery:** `--verify-archive` checks manifest hashes, log
   integrity (single `run_start`, ends with `run_end`, contiguous
   `tick_seq`), budget reconciliation (per-call sums = totals =
@@ -99,11 +136,13 @@ accepted in that review and are NOT reopened here.
 
 ## 5. Final test results
 
-- New: `tests/test_phase2_readiness.py` — **19/19 pass** (offline +
-  stub only; zero inference spend).
+- New: `tests/test_phase2_readiness.py` — **29/29 pass** (offline +
+  stub only; zero inference spend). 19 operational-readiness tests +
+  10 release-safeguard tests (fail-closed billing ×5, log integrity
+  ×2, objective completion ×3).
 - Phase 1 econ suite: included in the full run below.
 - Cost-model harness `tools/validate-cost-model.py`: **44/44**.
-- Full regression suite: **498/498 pass** (479 prior + 19 new).
+- Full regression suite: **508/508 pass** (498 prior + 10 new).
 
 ## 6. Outstanding risks
 
@@ -111,7 +150,25 @@ accepted in that review and are NOT reopened here.
    chat-completions response shape. If the operator's Meta Model API
    endpoint differs, only `PinnedModelAdapter`'s request/response
    mapping needs a bounded change — enforcement and accounting layers
-   are unaffected. Re-verify with one mocked call at launch config.
+   are unaffected. **First-call compatibility check (run ONCE at
+   launch, after Trevor's approval, BEFORE the behavioral experiment —
+   NOT executed in this certificate):**
+   ```
+   PHASE2_MODEL_API_URL=<operator endpoint> PHASE2_MODEL_API_KEY=<key> \
+   .venv/bin/python - <<'EOF'
+   import sys, json
+   sys.path.insert(0, "tools"); sys.path.insert(0, "tests")
+   from phase2_runner import PinnedModelAdapter
+   a = PinnedModelAdapter()  # reads PHASE2_MODEL_API_URL / PHASE2_MODEL_API_KEY
+   text, tin, tout = a.complete(
+       'Reply with exactly: {"action":"wait","params":{"minutes":1}}')
+   assert json.loads(text)["action"] == "wait", "unexpected action shape"
+   assert isinstance(tin, int) and isinstance(tout, int), "usage not int-billed"
+   print("endpoint shape OK; billed in/out:", tin, tout)
+   EOF
+   ```
+   Expected: prints the shape confirmation (one minimal billed call,
+   cents). If it fails, the real run refuses to start.
 2. **Rates at launch.** Dollar cap must be recomputed from
    then-current published rates before start (token caps bind
    regardless). Pre-registered value: $4.00.
@@ -125,10 +182,12 @@ accepted in that review and are NOT reopened here.
 ## 7. Authorization gate (unchanged)
 
 1. ✅ Phase 1 corrections (three rounds) — 479/479 tests.
-2. ✅ Final preflight + operational readiness (this certificate) —
-   498/498 tests, 44/44 harness.
-3. ⬜ ChatGPT independent review of this certificate.
+2. ✅ Final preflight + operational readiness + release safeguards
+   (this certificate) — 508/508 tests, 44/44 harness.
+3. ✅ ChatGPT independent review of the packet — conditional go
+   (2026-10-06); release safeguards accepted, no further development.
 4. ⬜ **Trevor's explicit approval** — the single decision: run or don't.
-5. ⬜ Only then: execute exactly per protocol, publish run log + outcome.
+5. ⬜ Only then: first-call compatibility check, provider-side spend
+   cap, then execute exactly per protocol, publish run log + outcome.
 
 **No step 5 without step 4. The pilot is ON HOLD.**

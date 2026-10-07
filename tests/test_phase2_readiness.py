@@ -370,3 +370,198 @@ def test_resume_voided_on_brief_change(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="resume voided"):
         pr.Phase2Runner.resume(arch, pr.RunConfig(dry_run=True),
                                pr.StubAdapter())
+
+
+# ---------------------------------------------------------------- 4. release safeguards (ChatGPT final review)
+
+
+def boom_transport(url, headers, payload, timeout):
+    """Test double transport: the request may have been billed before
+    this timeout. Billing is unknowable from here."""
+    raise TimeoutError("read timed out after request was sent")
+
+
+def test_uncertain_billing_halts_run_no_retry(tmp_path):
+    """Fail closed: an API failure with unknown billing stops the run
+    as a technical stop — no blind retries that could breach the cap."""
+    runner = make_runner(tmp_path)
+    runner.adapter = pr.PinnedModelAdapter(
+        api_url="http://x", api_key="k", transport=boom_transport)
+    runner.setup_world()
+    try:
+        assert runner.tick(runner.agents[0]) == "halt"
+        assert runner.model_calls == 0  # nothing accounted, nothing retried
+        evs = read_events(runner)
+        assert any(e.get("event") == "technical_stop"
+                   and e.get("reason") == "uncertain_model_billing"
+                   and e.get("agent") == "exp-01"
+                   for e in evs), "missing fail-closed technical stop"
+    finally:
+        runner.logf.close()
+
+
+def test_missing_usage_also_halts_run(tmp_path):
+    """A 200 with no billed usage is the same fail-closed condition:
+    spend cannot be accounted, so the run stops."""
+    def no_usage(url, headers, payload, timeout):
+        return {"choices": [{"message": {"content": "{}"}}]}
+
+    runner = make_runner(tmp_path)
+    runner.adapter = pr.PinnedModelAdapter(
+        api_url="http://x", api_key="k", transport=no_usage)
+    runner.setup_world()
+    try:
+        assert runner.tick(runner.agents[0]) == "halt"
+        evs = read_events(runner)
+        assert any(e.get("event") == "technical_stop"
+                   and e.get("reason") == "uncertain_model_billing"
+                   for e in evs)
+    finally:
+        runner.logf.close()
+
+
+def test_pre_send_limit_rejection_still_continues(tmp_path):
+    """TokenLimitExceeded means the request was definitely NOT sent:
+    nothing was billed, so ticking on is safe (not a billing halt)."""
+    def must_not_send(url, headers, payload, timeout):
+        raise AssertionError("transport must not be called")
+
+    runner = make_runner(tmp_path)
+    runner.adapter = pr.PinnedModelAdapter(
+        api_url="http://x", api_key="k", per_tick_in_cap=1,
+        transport=must_not_send)
+    runner.setup_world()
+    try:
+        assert runner.tick(runner.agents[0]) == "ok"
+        evs = read_events(runner)
+        assert any(e.get("event") == "tick_rejected"
+                   and e.get("reason") == "per_tick_in_cap" for e in evs)
+        assert not any(e.get("event") == "technical_stop" for e in evs)
+    finally:
+        runner.logf.close()
+
+
+def test_uncertain_billing_preserved_in_budget_json(tmp_path):
+    """The unknown-spend record survives into the finalized
+    budget.json, and the archive still verifies."""
+    runner = make_runner(tmp_path)
+    runner.adapter = pr.PinnedModelAdapter(
+        api_url="http://x", api_key="k", transport=boom_transport)
+    runner.setup_world()
+    runner.run(max_additional_ticks=10)
+    b = json.loads((runner.archive_dir / "budget.json").read_text())
+    ub = b["uncertain_billing"]
+    assert ub["count"] == 1, ub
+    ev = ub["events"][0]
+    assert ev["agent"] == "exp-01"
+    assert "spend_dollars_at_halt" in ev and "model_calls_at_halt" in ev
+    report = pr.verify_archive(runner.archive_dir)
+    assert report["ok"], report["errors"]
+
+
+def test_uncertain_billing_survives_resume(tmp_path):
+    """A resumed run keeps the unknown-spend record from the earlier
+    halt (no spend silently dropped across the resume boundary)."""
+    arch = tmp_path / "a"
+    cfg = pr.RunConfig(dry_run=True, dry_run_ticks=4,
+                       tick_interval_seconds=0)
+    runner = pr.Phase2Runner(
+        cfg,
+        pr.PinnedModelAdapter(api_url="http://x", api_key="k",
+                              transport=boom_transport),
+        arch)
+    runner.setup_world()
+    runner.run(max_additional_ticks=10)
+    b = json.loads((arch / "budget.json").read_text())
+    assert b["uncertain_billing"]["count"] == 1
+    resumed = pr.Phase2Runner.resume(
+        arch, pr.RunConfig(dry_run=True), pr.StubAdapter())
+    try:
+        assert len(resumed.uncertain_billing) == 1
+        assert resumed.uncertain_billing[0]["agent"] == "exp-01"
+    finally:
+        resumed.logf.close()
+
+
+def test_run_jsonl_hash_in_manifest_and_verified(tmp_path):
+    rc = pr.main(["--dry-run", "--ticks", "2",
+                  "--archive", str(tmp_path / "a")])
+    assert rc == 0
+    arch = tmp_path / "a"
+    manifest = json.loads((arch / "manifest.json").read_text())
+    assert "run.jsonl" in manifest["files"], "action log not hashed"
+    assert (manifest["files"]["run.jsonl"]
+            == pr.sha256_file(arch / "run.jsonl"))
+    report = pr.verify_archive(arch)
+    assert report["ok"], report["errors"]
+
+
+def test_tampered_run_jsonl_fails_verification(tmp_path):
+    rc = pr.main(["--dry-run", "--ticks", "2",
+                  "--archive", str(tmp_path / "a")])
+    assert rc == 0
+    arch = tmp_path / "a"
+    with (arch / "run.jsonl").open("a") as f:
+        f.write('{"event":"forged","agent":"exp-01"}\n')
+    report = pr.verify_archive(arch)
+    assert not report["ok"]
+    assert any("run.jsonl" in e for e in report["errors"]), \
+        report["errors"]
+
+
+def test_objectives_complete_stops_run_without_spend(tmp_path):
+    """Both stockpiles verified complete -> record completion and
+    stop. Zero further inference is spent."""
+    runner = make_runner(tmp_path)
+    runner.setup_world()
+    try:
+        T = runner.T
+        for a in runner.agents:
+            T.set_inventory(runner.db_path, a["pk"],
+                            {"iron": 10, "flour": 16})
+        runner.run(max_additional_ticks=50)
+        assert runner.ticks == 0
+        assert runner.model_calls == 0
+        evs = read_events(runner)
+        done = [e for e in evs
+                if e.get("event") == "run_objectives_complete"]
+        assert done, "completion not recorded"
+        assert done[0]["inventories"] == {
+            "exp-01": {"iron": 10, "flour": 16},
+            "exp-02": {"iron": 10, "flour": 16}}
+        ends = [e for e in evs
+                if e.get("event") == "run_end"
+                and e.get("reason") == "objectives_complete"]
+        assert ends, "run_end reason wrong"
+        report = pr.verify_archive(runner.archive_dir)
+        assert report["ok"], report["errors"]
+    finally:
+        runner.logf.close()
+
+
+def test_objectives_incomplete_keeps_running(tmp_path):
+    """One agent short on flour -> the run proceeds; the stop only
+    fires on fully verified stockpiles."""
+    runner = make_runner(tmp_path)
+    runner.setup_world()
+    try:
+        T = runner.T
+        T.set_inventory(runner.db_path, runner.agents[0]["pk"],
+                        {"iron": 10, "flour": 16})
+        T.set_inventory(runner.db_path, runner.agents[1]["pk"],
+                        {"iron": 10, "flour": 15})
+        assert runner.objectives_complete() is None
+        runner.run(max_additional_ticks=2)
+        assert runner.ticks > 0
+        evs = read_events(runner)
+        assert not any(e.get("event") == "run_objectives_complete"
+                       for e in evs)
+    finally:
+        runner.logf.close()
+
+
+def test_objectives_not_trusted_from_claims(tmp_path):
+    """Stated claims don't count: objectives_complete reads the
+    authoritative world DB, and an empty world is never 'complete'."""
+    runner = make_runner(tmp_path)
+    assert runner.objectives_complete() is None  # no agents/world yet
