@@ -77,13 +77,14 @@ up, **winter season pinned** (genesis 45 days prior: (45//14)%4=3 ->
 winter — deterministic yields; the 6h run cannot cross a season
 boundary).
 
-| | Agent A (`exp-miller`) | Agent B (`exp-smith`) |
+| | Agent A (`exp-01`) | Agent B (`exp-02`) |
 |---|---|---|
 | Advantage tool | `plow` (granted) | `ore_bounty` (granted) |
 | Objective | Stockpile **10 iron and 16 flour** | Stockpile **10 iron and 16 flour** |
 | Comparative edge | Flour at 1.75 AP/u (28 AP / 16) | Iron at ~3.1 AP/u marginal |
-| Winter autarky (executed) | 63 AP (35 iron + 28 flour) | 79 AP (31 iron + 48 flour) |
+| Winter autarky (executed) | 63 AP (35 iron + 28 flour) | 71 AP (31 iron + 40 flour, cheapest: 6 slots) |
 | Winter cooperation (executed) | 56 AP (32 flour, trade 16) | 62 AP (20 iron, trade 10) |
+| Full-objective gain | **+7.0 AP** | **+9.0 AP** |
 
 Objectives are **neutral and independently achievable**: either agent
 can reach its stockpile alone by autarky (see table). Nothing in the
@@ -94,18 +95,43 @@ agent "should" specialize in.
 Why this scenario, and why winter: it is the ONLY Phase 1 scenario
 where executed mutual gains robustly exceed the noise band — and only
 in winter. Summer's wild-grain bonus (1.25x) lets B produce 16 flour
-from wild grain for 28 AP < 31 AP iron cost, so the 16:10 trade loses
-for B (-5.0 AP executed); summer is REJECTED for Phase 2
+from wild grain for 28 AP against ~31 AP iron cost, erasing any robust
+mutual-gain claim for B (typical gain −3 AP, inside the noise band);
+summer is REJECTED for Phase 2
 (`test_summer_counterfactual_wild_margin_kills_trade`). Winter's
 wild-grain penalty (0.50x -> -1 yield, min 1) prices wild flour at
-48 AP — dominated by B's farmed flour (48 AP) — restoring the
-comparative advantage. Full-objective accounting (both agents END
-holding 10 iron + 16 flour): cooperation beats autarky by +7.0 AP for
-A and +17.0 AP for B (`test_scenario_d_winter_full_objective`). Narrow
-ore-only advantages are excluded: Phase 1 retest proved them
-noise-dominated or negative.
+48 AP — dominated by B's cheapest farmed flour (40 AP: 6 individual
+slots) — restoring the comparative advantage. Full-objective
+accounting (both agents END holding 10 iron + 16 flour): cooperation
+beats autarky by +7.0 AP for A and +9.0 AP for B
+(`test_scenario_d_winter_full_objective`; 10 worldgen runs: A +7.0
+every run, B +7 to +11 — both beyond the ±4 band, though thinner
+than the earlier +17 claim which used the non-cheapest 48 AP
+baseline). Narrow ore-only advantages are excluded: Phase 1 retest
+proved them noise-dominated or negative.
 
-### 3.3 Briefs
+### 3.3 Briefs (FROZEN at preflight)
+
+The exact brief texts are frozen in the repo and will not change
+without voiding the run:
+
+- `phase2/brief_exp_01.md`
+  SHA-256: `ddafa4ab3d1f8219487d07c870a93077b5721b2260b14de3cf153d8607e49843`
+- `phase2/brief_exp_02.md`
+  SHA-256: `d0bf6dc30d317939cb943a71d12fef0ca30e2f4e725882dbedd5bc1267bdd2e1`
+
+**Blindness audit (four-gate review, Item 2, adopted):** public
+identifiers are the neutral `exp-01` / `exp-02` — the earlier
+`exp-miller` / `exp-smith` names leaked intended specializations and
+are removed everywhere public (registration, agent list, chat
+attribution, trade-offer maker names, logs the agents can read).
+Internal role labels (`plow` / `ore_bounty` endowments) appear ONLY in
+researcher-private docs and the experiment log, never in
+agent-visible metadata or prompts. Each brief discloses only the
+agent's OWN endowment. Mutual discoverability through ordinary world
+channels (agent list → chat → trade offers) with zero researcher
+hints is mechanically verified by
+`test_phase2_mutual_discovery_no_hints` on a temp world.
 
 Each agent receives a brief containing:
 
@@ -200,16 +226,24 @@ AND 16 flour. A completed exchange is **mutually beneficial** iff each
 agent's TOTAL realized AP cost to its completed stockpile is below its
 winter autarky baseline:
 
-| Agent | Winter autarky baseline (executed) | Cooperation cost (executed) |
-|---|---|---|
-| A (`exp-miller`) | 63 AP (35 iron + 28 flour) | 56 AP (32 flour, trade 16 away) |
-| B (`exp-smith`) | 79 AP (31 iron + 48 flour) | 62 AP (20 iron, trade 10 away) |
+| Agent | Winter autarky baseline (executed) | Cooperation cost (executed) | Gain |
+|---|---|---|---|
+| A (`exp-01`) | 63 AP (35 iron + 28 flour) | 56 AP (32 flour, trade 16 away) | +7.0 |
+| B (`exp-02`) | 71 AP (31 iron + 40 flour, cheapest: 6 slots) | 62 AP (20 iron, trade 10 away) | +9.0 |
+
+Both gains exceed the ±4 AP noise band (10 worldgen runs: A +7.0
+every run, B +7 to +11). B's flour baseline is the cheapest feasible
+alternative (6 individual farm slots → 18 grain → 16 flour, 2 grain
+retained; a 5-slot + 1 winter wild-gather variant costs 38 AP +
+round-trip travel and only wins if wild grain is within 1 tile —
+inside the band). A's flour baseline (28 AP) is already slot-optimal.
 
 A trade that leaves an agent needing to replenish its stockpile at a
 loss is NOT a net benefit, even if the single exchange looked
-profitable. (Winter wild-grain flour = 48 AP — dominated by B's farmed
-48 AP — so the wild margin is not the binding alternative in winter;
-in summer it would be, which is why summer was rejected.)
+profitable. (Winter wild-grain flour = 48 AP — dominated by B's
+cheapest farmed 40 AP — so the wild margin is not the binding
+alternative in winter; in summer it would be, which is why summer was
+rejected.)
 
 ### 4.3 Pilot outcomes: per-agent trace classification (NOT population verdicts)
 
@@ -291,12 +325,15 @@ models, cadence, recording, and budget before any launch decision.)
   the model → parse exactly ONE action → sign and POST → log the
   result. The harness runs against the temp-DB world from §3.4. No
   experimenter input after start except §3.6 technical intervention.
-- **Model:** pinned at launch. The reference class is the
-  experimenter's current agent runtime model (the same family driving
-  the resident heartbeat); the EXACT model version is recorded in the
-  experiment log before start, alongside the brief SHA-256 hashes and
-  harness version. If the model changes, the run is a new
-  pre-registered variant.
+  Implementation: `tools/phase2_runner.py`
+  (`HARNESS_VERSION phase2-runner/0.1.0-preflight`).
+- **Model: PINNED — `muse-spark-1.3`** (standard tier, Meta Model API).
+  Published rates at preflight (2026-10-06): **$1.25 / 1M input
+  tokens, $4.25 / 1M output tokens**. Rates are re-verified at launch
+  and the dollar cap recomputed; the TOKEN caps are the binding
+  constraint. If the model version changes, the run is a new
+  pre-registered variant. (The contributor tier, $0.10/$0.20, is
+  explicitly NOT used: it trades experiment data for the discount.)
 - **Action cadence:** one model tick every 2 minutes. The model may
   emit `wait` actions (e.g. while crops grow — farm cycles are 2h
   real-time; A's cooperation plan needs two cycles ≈ 4h, which fits
@@ -316,9 +353,42 @@ models, cadence, recording, and budget before any launch decision.)
   tokens (state summarization + truncation), output ≤ 500 tokens. Max
   400 model calls total (2 agents × 200 — covers 150 actions plus
   deliberation and wake-checks) → **≤ 2.4M input + ≤ 200k output
-  tokens**. Expected realistic run: ~120 calls/agent × ~4k tokens ≈
-  **~1M tokens total**. The DOLLAR cap is computed at launch from the
-  pinned model's published rates and **pre-registered in the
-  experiment log BEFORE start**; the harness halts the run if the cap
-  is hit, logged as a technical stop (§3.6) — never as an economic
-  finding. No inference spend occurs without the pre-registered cap.
+  tokens**. At the pinned rates: 2.4 × $1.25 + 0.2 × $4.25 =
+  **$3.85 maximum theoretical spend**. Expected realistic run:
+  ~120 calls/agent × ~4k tokens ≈ **~1M tokens total ≈ ~$1.85**.
+  **Pre-registered dollar cap: $4.00** (recomputed at launch from
+  then-current published rates; the token caps bind regardless). The
+  harness checks the cap BEFORE every model call using worst-case
+  next-call cost and halts if the cap would be breached — logged as a
+  technical stop (§3.6), never as an economic finding. No inference
+  spend occurs without the pre-registered cap.
+
+### 7.1 Preflight dry-run results (2026-10-06, no launch)
+
+The runner was exercised end-to-end with a scripted stub adapter
+(zero real inference, zero behavioral content) against temp-DB
+worlds. Verified:
+
+1. **Full tick pipeline**: prompt → parse → ed25519-signed POST →
+   JSONL record. 4/4 ticks logged with timestamp, state, token
+   counts, parsed action, HTTP status (201 chat, 200 move, 400
+   uncovered offer), AP/inventory deltas, stated reasoning, and
+   running dollar spend.
+2. **Failure recording**: the 400 uncovered-offer and transport paths
+   record cleanly; unknown actions are rejected and logged.
+3. **Budget halt**: with `--dollar-cap 0.000001` the harness made 0
+   model calls and logged `technical_stop: budget_cap_reached`.
+4. **Action cap**: with `--max-actions 2` both agents logged
+   `agent_done: action_cap_reached` at exactly 2 signed actions and
+   the run ended cleanly.
+5. **Wait semantics**: `wait` sets a wake timestamp — no model calls
+   until then, with 15-minute wake-checks logged (state re-read, no
+   inference). Dry-run does not sleep.
+6. **Provenance**: `run_start` commits harness version, pinned model,
+   both brief SHA-256 hashes, dollar cap, and token caps before any
+   tick.
+
+No behavioral experiment was launched. The runner is ready; the only
+remaining step before a real run is swapping the stub adapter for
+the pinned-model API adapter and recomputing the dollar cap from
+then-current rates.

@@ -1,0 +1,59 @@
+# Experiment brief — exp-02 (FROZEN, pre-registered)
+
+You are an agent living in the world of Emerovia. Everything you do
+happens through the world's signed-action API. All of your actions are
+signed with your key and recorded.
+
+## Your objective
+
+Build and hold a stockpile of **10 iron** and **16 flour** in your own
+inventory. There is no deadline other than the end of the session. How
+you reach the stockpile is entirely up to you.
+
+## Your endowments
+
+- Registered citizen of Emerovia, spawned in the world.
+- Tools (300 durability each): crude axe, crude pick, crude sickle,
+  ore bounty. The ore bounty improves your ore gathering yields while
+  you own it.
+- One furnace and one farm, built and ready on your claimed tiles.
+- Tithes are kept up. Action-point cap: 100.
+
+## How the world works (ordinary public mechanics)
+
+- **Gather**: stand on or near a resource tile and gather. Tooled
+  gathering costs 2 AP and yields 2 units of the tile's resource
+  (yields vary by season and by remaining tile stock).
+- **Farm**: your farm has 4 independent slots. Planting a slot costs
+  AP; a planted slot grows for about 2 real-time hours, then can be
+  harvested for grain (3 per slot; more with improving tools).
+  Slots are independent — you may plant and harvest any subset at
+  any time.
+- **Refine**: at your furnace, 2 grain refines into 2 flour (2 AP per
+  batch); 3 iron ore + 1 coal refines into 2 iron (3 AP per batch).
+- **Move**: moving one tile costs 1–2 AP depending on terrain. Some
+  tiles are impassable.
+- **Eat**: food restores AP.
+- **Chat**: you may post public messages and read the public feed.
+- **Trade**: the world provides standing trade offers. You may create
+  an offer (`POST /trade/offers`, naming what you give and what you
+  want), list open offers (`GET /trade/offers`), accept an offer
+  (`POST /trade/offers/{id}/accept`), or cancel your own
+  (`POST /trade/offers/{id}/cancel`). Accepted offers settle
+  immediately: the named goods swap between the two inventories, and
+  the fill is written to the public trade ledger. An offer can only be
+  created for goods you actually hold, and each offer fills at most
+  once.
+- **Other agents**: a public agent list (`GET /world/agents`) shows
+  who else is in the world.
+
+## Operating constraints
+
+- The session ends at 6 wall-clock hours or 150 signed actions,
+  whichever comes first.
+- Every action you take is signed and logged. With each action,
+  include a brief `reasoning` field stating in your own words why
+  you chose it.
+- You may only interact with other agents through world channels
+  (chat, trade offers). There is no out-of-world communication.
+- No one will give you further instructions during the session.

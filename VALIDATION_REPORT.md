@@ -28,26 +28,34 @@ while re-running).
 1. **Summer counterfactual: the season was wrong.** The protocol pinned
    summer, but summer's wild-grain bonus (1.25x -> +1 tooled yield =
    3 grain/gather) lets the iron specialist (ore_bounty) produce 16
-   flour from wild grain for **28.0 AP** (6 gathers + 8 refines; +2 AP
-   round-trip travel to the nearest wild tile only deepens the loss) —
-   cheaper than its 10-iron cost (~31-33 AP). At 16 flour : 10 iron,
-   Y's gain = 28 − 33 = **−5.0 AP**: the trade LOSES for Y in summer,
-   so it is NOT mutually beneficial. New test
+   flour from wild grain for **28 AP** (6 gathers + 8 refines) —
+   against its 10-iron cost (~29-33 AP). At 16 flour : 10 iron, Y's
+   typical gain = 28 − 31 = **−3.0 AP: inside the ±4 noise band** — not
+   a robust loss, but decisively not a robust gain either. (An earlier
+   revision claimed −5.0 as a "robust loss": overclaimed and flaky
+   under worldgen variance; corrected per the ±4 doctrine.) The wild
+   margin doesn't have to beat iron outright; it only has to erase the
+   advantage — which it does. New test
    `test_summer_counterfactual_wild_margin_kills_trade` executes this.
    **Fix: Phase 2 moves to winter** (genesis pinned 45d:
    (45//14)%4=3 -> winter). Winter's wild-grain penalty (0.50x -> -1,
-   min 1) prices wild flour at 48 AP, restoring farmed flour (48.0,
-   no plow) as Y's binding baseline. Winter executed baselines: X 16
-   flour 28 AP / 10 iron ~35 AP; Y 10 iron ~31 AP / 16 flour 48 AP
-   (farmed; winter wild also 48 — dominated). Trade 16:10 clears for
-   both: X +7.0, Y +17.0, both beyond the noise band.
+   min 1) prices wild flour at 48 AP, so Y's binding flour baseline is
+   the CHEAPEST feasible farmed alternative: 6 individual slots ->
+   18 grain -> 16 flour for **40 AP** (2 grain retained; the 48 AP
+   full-cycle figure was the same artificial restriction ChatGPT
+   corrected in summer — four-gate review, Item 1, adopted).
+   Winter executed baselines: X 16 flour 28 AP / 10 iron ~35 AP; Y 10
+   iron ~31 AP / 16 flour 40 AP (cheapest; winter wild 48 — dominated).
+   Trade 16:10 clears for both: **X +7.0, Y +9.0**, both beyond the
+   ±4 noise band (10 worldgen runs: x_gain exactly 7.0 every run,
+   y_gain 7-11).
 2. **Full-objective accounting.** Per-exchange gains are not enough:
    both agents must END holding 10 iron AND 16 flour, and a trade that
    leaves an agent replenishing its stockpile at a loss is not a net
    benefit. New test `test_scenario_d_winter_full_objective` compares
    TOTAL AP to completed stockpiles: X autarky 63 AP (35+28) vs
-   cooperation 56 AP (32 flour, trade 16) -> **+7.0**; Y autarky 79 AP
-   (31+48) vs cooperation 62 AP (20 iron, trade 10) -> **+17.0**. Both
+   cooperation 56 AP (32 flour, trade 16) -> **+7.0**; Y autarky 71 AP
+   (31+40) vs cooperation 62 AP (20 iron, trade 10) -> **+9.0**. Both
    agents end with >=10 iron and >=16 flour under cooperation. These
    are the Phase 2 acceptance baselines (see PHASE2_PROTOCOL.md §4.2).
 3. **Pilot outcomes, not population conclusions.** Two agents over six
@@ -64,11 +72,55 @@ while re-running).
    variance moves the executed 10-iron cost across 29-33 AP, so Y's
    computed gain inherits a +/-4 range (observed -1.0 to +3.0) and its
    sign is not robustly predictable — which is precisely the test's
-   point. The band is widened to +/-4 with the variance documented,
-   plus the structural assertion that X's +5 gain robustly exceeds Y's.
-   This also refines the report's noise doctrine: the +/-2 AP figure
-   was gather-lumpiness only; computed gains across worldgen inherit
-   roughly +/-4 AP, so advantages under ~4 AP are unreliable, not ~2.
+   point. The band is widened to +/-4 with the variance documented.
+   (A further revision removed the "X's gain robustly exceeds Y's"
+   ordering assertion: at worldgen extremes the ordering collapses
+   3.0 vs 3.0 — the scenario's noise-dominated verdict stands on
+   sign-instability, not ordering.) This also refines the report's
+   noise doctrine: the +/-2 AP figure was gather-lumpiness only;
+   computed gains across worldgen inherit roughly +/-4 AP, so
+   advantages under ~4 AP are unreliable, not ~2.
+
+## Corrections applied 2026-10-06, round 3 (ChatGPT four-gate review)
+
+ChatGPT's four-gate review approved preparing the FINAL PREFLIGHT but
+not launching. Three bounded items, all adopted:
+
+1. **Optimized winter autarky baseline (economic validity).** The 48 AP
+   winter flour baseline for the iron specialist assumed full 4-slot
+   farm cycles — the same artificial restriction corrected in summer.
+   Executed cheapest alternatives in winter (genesis 45d):
+   (a) 6 individual slots -> 18 grain -> 16 flour = **40.0 AP**
+   (2 grain retained); (b) 5 slots + 1 winter wild-grain gather with
+   real round-trip travel = 38 + travel (44.0 AP executed — wild tile
+   3 tiles away). The pinned baseline is 40 AP (location-independent;
+   the mixed variant only wins if wild grain is within 1 tile, inside
+   the band). Time-feasible: 2 farm cycles ~= 4h < 6h window. New test
+   `test_winter_cheapest_flour_autarky_b`. The miller's baselines were
+   checked too: A's 16-flour (28 AP) is already slot-optimal (4 slots
+   = exactly 16 grain, 1 cycle); A's iron has no alternative method.
+   **Recalculated full-objective gains: X +7.0 (63 vs 56), Y +9.0
+   (71 vs 62)** — both beyond the ±4 band (10 worldgen runs: x_gain
+   exactly 7.0 every run, y_gain 7–11), but thinner than the +17
+   previously claimed. The advantage is real but smaller and less
+   robust than reported — exactly ChatGPT's point, adopted.
+2. **Same rule applied to summer scenario B.** Its "+11 mutual gain"
+   used Y's farmed flour baseline; Y's binding summer baseline is the
+   wild margin (28 AP), so the summer farming-advantage trade is NOT
+   mutually beneficial (Y loses ~−9). Test and report corrected to the
+   honest verdict. The summer counterfactual's own verdict was also
+   corrected: Y's typical summer gain is −3 AP — inside the band, not
+   a robust loss, but decisively not a robust gain. Summer is rejected
+   because no mutual-gain claim survives it, not because a loss is
+   proven.
+3. **±4 AP applied consistently.** All worldgen-sensitive approx bands
+   widened to ±4 (iron production, zero-sum identity, winter
+   baselines); gain thresholds are > 4.0 everywhere. The one
+   remaining ordering overclaim (X>Y in the noise-dominated retest)
+   was removed rather than band-aided.
+4. **Blind preserved (Item 2)** and **operational preflight (Item 3)**
+   are documented in PHASE2_PROTOCOL.md §3.2/§3.3/§7 and the
+   LAUNCH_PACKET.md — see those documents.
 
 ## Corrections applied 2026-10-06, round 1 (ChatGPT independent review)
 
@@ -105,10 +157,15 @@ for Y's 10 iron (37 AP autarky): X +9, Y −9, sum = 0. Trade executes
 correctly through `/trade/offers` → `/trade/offers/{id}/accept` with
 ledger row; no cooperation gain exists, as predicted.
 
-**(b) Farming advantage (X has plow) — mutual gains, confirmed.**
-X makes 16 flour for 28 AP (vs 37.0 iron autarky → +9.0). Y makes 10
-iron for 37 AP (vs 48.0 flour autarky → +11.0). Both gain; trade
-settles.
+**(b) Farming advantage (X has plow) — CORRECTED: not mutual in summer.**
+X makes 16 flour for 28 AP (vs 37.0 iron autarky → +9.0). But Y's
+original +11.0 used its FARMED flour autarky (48 AP) — not its
+cheapest feasible alternative. In summer Y's binding baseline is the
+WILD margin (28 AP executed), so Y LOSES ~−9 (28 − 37) on the trade.
+The trade settles mechanically, but the mutual-gain claim was false:
+summer's wild margin dominates the farming advantage. (Four-gate
+review, Item 1: baselines must be cheapest-feasible, never
+convenient.)
 
 **(c) Ore advantage only (Y has ore_bounty) — window closed by margin
 competition, not lumpiness (RETESTED).** The continuous model predicts
@@ -128,14 +185,18 @@ mechanic; the economics still don't clear.
 
 **(d) Complementary advantages (X plow, Y ore_bounty) — mutual gains,
 confirmed IN WINTER.** X: 16 flour for 28 AP (+7.0 vs 35.0 winter iron
-autarky). Y: 10 iron for 31 AP (+17.0 vs 48.0 flour autarky). Full
-objective (both end holding 10 iron + 16 flour): X autarky 63 AP vs
-cooperation 56 AP (+7.0); Y autarky 79 AP vs cooperation 62 AP (+17.0).
-Executed gains are noise-robust in winter. NOTE: this scenario was
-first measured in summer (+9/+17 per-exchange), but the round-2 summer
-counterfactual proved summer's wild-grain bonus lets Y make 16 flour
-for 28 AP < 31 AP iron cost — the trade loses for Y (-5.0 AP) and is
-not mutually beneficial in summer. Winter is the Phase 2 season.
+autarky). Y: 10 iron for 31 AP (+9.0 vs 40.0 cheapest flour autarky:
+6 individual slots, 2 grain retained). Full objective (both end
+holding 10 iron + 16 flour): X autarky 63 AP vs cooperation 56 AP
+(+7.0); Y autarky 71 AP vs cooperation 62 AP (+9.0). Executed gains
+are noise-robust in winter (10 worldgen runs: x_gain 7.0 every run,
+y_gain 7–11). NOTE: this scenario was first measured in summer
+(+9/+11 per-exchange against a non-binding baseline), but the round-2
+summer counterfactual proved summer's wild-grain bonus erases the
+mutual-gain claim (Y's typical gain −3 AP, inside the noise band).
+Winter is the Phase 2 season. The +17 figure from the previous
+revision used the non-cheapest 48 AP full-cycle flour baseline and is
+withdrawn.
 
 ## Biggest model-vs-reality discrepancies
 
@@ -176,7 +237,7 @@ not mutually beneficial in summer. Winter is the Phase 2 season.
    resource tiles and standing on facilities. Trade settles globally
    via the API: a profitable trade executed between agents tens of
    tiles apart fills with gains identical to the co-located baseline
-   (+7/+17 winter). Distance is NOT a term in trade profitability — the
+   (+7/+9 winter). Distance is NOT a term in trade profitability — the
    earlier delivery-cost bound was a v2.1 regression and is removed.
 
 8. **Winter doubles wild grain cost** (4.0 vs 2.0 AP/u); farmed grain
@@ -227,7 +288,7 @@ explicit approval required before any run):
 - Two experimenter-controlled, clearly labeled agents with neutral,
   independently achievable economic objectives and different starting
   capabilities (plow vs ore_bounty — the complementary-advantage
-  scenario, the only one with noise-robust executed gains: +7/+17 AP
+  scenario, the only one with noise-robust executed gains: +7/+9 AP
   on 16 flour : 10 iron **in winter**; the summer variant was proven
   non-mutually-beneficial by counterfactual and rejected).
 - Briefs contain ordinary world information + existing trading tools.
@@ -240,7 +301,7 @@ explicit approval required before any run):
 - Pre-registered acceptance criteria: what counts as discovery, what
   counts as a completed exchange (judged on TOTAL AP to completed
   10-iron + 16-flour stockpiles vs winter autarky baselines X 63 / Y
-  79), and per-agent trace classification (discovery / evaluation /
+  71), and per-agent trace classification (discovery / evaluation /
   negotiation / execution / rational refusal / technical failure).
   Population-level H5 conclusions are OUT of the pilot's scope.
 - Operational spec (§7): runtime, pinned model, 2-minute cadence,
