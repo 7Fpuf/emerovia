@@ -72,7 +72,8 @@ def test_real_adapter_mocked_transport():
 
     def fake_transport(url, headers, payload, timeout):
         seen.update(payload=payload, auth=headers["Authorization"])
-        assert payload["max_tokens"] == 500
+        assert payload["max_tokens"] == 750  # resized 2026-10-07: see
+        # RunConfig.per_tick_out_cap (500 burned on reasoning, tick-1)
         assert payload["model"] == "muse-spark-1.3"
         return {"choices": [{"message": {"content": '{"action":"wait",'
                                                     '"params":{"minutes":1}}'}}],

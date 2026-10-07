@@ -68,11 +68,12 @@ the wild margin out (48 AP).
 - **Hard budget enforcement at the API boundary:**
   - Prompt estimated > 6,000 tokens → rejected BEFORE sending
     (nothing billed).
-  - `max_tokens=500` set on every request (API-side output cap).
+  - `max_tokens=750` set on every request (API-side output cap;
+    resized 2026-10-07 from 500 after the tick-1 abort — see §5).
   - Billed `usage` accounted at face value — never estimated, never
     clipped. Missing usage → refuse; billed over caps →
     `BilledCapAnomaly` → technical-stop halt.
-  - $4.00 cap: worst-case next-call cost checked before every call;
+  - $4.50 cap: worst-case next-call cost checked before every call;
     billed spend re-checked after every call. Both halt as technical
     stops.
   - Action cap counts every signed attempt (200/400/409/transport
@@ -134,18 +135,18 @@ pre-registered variant.
 
 ## 5. Budget, duration, stop conditions
 
-- **Token caps (binding):** ≤6,000 in / ≤500 out per tick; ≤400 model
-  calls total → ≤2.4M in + ≤200k out.
-- **Dollar cap (pre-registered): $4.00** — covers the $3.85 maximum
-  theoretical spend at pinned rates (2.4×$1.25 + 0.2×$4.25).
-  Expected realistic: ~1M tokens ≈ **~$1.85**. Recomputed at launch
+- **Token caps (binding):** ≤6,000 in / ≤750 out per tick; ≤400 model
+  calls total → ≤2.4M in + ≤300k out.
+- **Dollar cap (pre-registered): $4.50** — covers the $4.275 maximum
+  theoretical spend at pinned rates (2.4×$1.25 + 0.3×$4.25).
+  Expected realistic: ~300 calls ≈ **~$1.40**. Recomputed at launch
   from then-current rates; token caps bind regardless.
 - **Duration:** 6 wall-clock hours max; 150 signed actions/agent max;
   tick cadence ~2 min/agent.
 - **Stop conditions:** budget cap (worst-case next-call cost checked
-  BEFORE every call), action cap, wall-clock cap — all logged as
-  technical stops, never as economic findings. No spend without the
-  pre-registered cap.
+  BEFORE every call), action cap, wall-clock cap, 4 consecutive empty
+  model responses — all logged as technical stops, never as economic
+  findings. No spend without the pre-registered cap.
 
 ## 6. What the pilot can and cannot conclude
 

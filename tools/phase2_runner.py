@@ -64,10 +64,11 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tests"))
 
 # Pinned model + rates (standard tier, Meta Model API; verified 2026-10-06
-# via public pricing pages: $1.25/M input, $4.25/M output, $0.15/M cached
-# input — cached input not used here). Re-verify at launch; the TOKEN
-# caps below are the binding constraint, the dollar cap is recomputed
-# from whatever rates are current and pre-registered before start.
+# and re-verified 2026-10-07 via public pricing pages: $1.25/M input,
+# $4.25/M output, $0.15/M cached input — cached input not used here).
+# Re-verify at launch; the TOKEN caps below are the binding constraint,
+# the dollar cap is recomputed from whatever rates are current and
+# pre-registered before start.
 PINNED_MODEL = "muse-spark-1.3"
 RATE_IN_PER_M = 1.25
 RATE_OUT_PER_M = 4.25
@@ -227,7 +228,7 @@ class PinnedModelAdapter(ModelAdapter):
     in the provider's billing console, put a hard spend limit / budget
     alert at or below the experiment cap on a DEDICATED experiment API
     key before launch, and never reuse a general-purpose key for the
-    pilot. The runner's in-code $4 cap is the primary safeguard; the
+    pilot. The runner's in-code $4.50 cap is the primary safeguard; the
     provider-side limit is the backstop. Console steps are provider-
     specific — verify them at launch, do not assume a UI path."""
 
@@ -238,7 +239,13 @@ class PinnedModelAdapter(ModelAdapter):
                  api_key: str | None = None,
                  model: str = PINNED_MODEL,
                  per_tick_in_cap: int = 6000,
-                 per_tick_out_cap: int = 500,
+                 # 750: resized from 500 after the 2026-10-07 tick-1 abort,
+                 # where muse-spark-1.3 burned the full 500-token output
+                 # budget on reasoning (content=null,
+                 # finish_reason=length). 500 observed reasoning burn +
+                 # 250 headroom for the tiny JSON action. Keep in sync
+                 # with RunConfig.per_tick_out_cap (main() wires them).
+                 per_tick_out_cap: int = 750,
                  temperature: float = 0.7,
                  timeout_s: int = 120,
                  transport=None):
@@ -310,13 +317,24 @@ class PinnedModelAdapter(ModelAdapter):
         return text, int(billed_in), int(billed_out)
 
 
-def build_adapter(dry_run: bool) -> ModelAdapter:
+def build_adapter(dry_run: bool,
+                  cfg: RunConfig | None = None) -> ModelAdapter:
     """Adapter factory. dry-run -> scripted stub. Anything else -> the
     REAL pinned-model adapter, which raises AdapterConfigError loudly
-    if it cannot be constructed. There is NO silent stub fallback."""
+    if it cannot be constructed. There is NO silent stub fallback.
+
+    The adapter's token caps are wired from the run config so the
+    API-side max_tokens can never drift from the budget math's
+    per-tick caps (the 2026-10-07 abort was a cap the config knew
+    but the wire request enforced differently — now impossible)."""
     if dry_run:
         return StubAdapter()
-    return PinnedModelAdapter()
+    if cfg is None:
+        return PinnedModelAdapter()
+    return PinnedModelAdapter(
+        per_tick_in_cap=cfg.per_tick_in_cap,
+        per_tick_out_cap=cfg.per_tick_out_cap,
+        temperature=cfg.model_temperature)
 
 
 # Phase 2 stockpile objectives (protocol §3): both agents must END
@@ -335,9 +353,20 @@ class RunConfig:
     max_actions_per_agent: int = 150
     max_wall_seconds: int = 6 * 3600
     per_tick_in_cap: int = 6000
-    per_tick_out_cap: int = 500
+    # 750 = 500 observed reasoning burn on the 2026-10-07 tick-1 abort
+    # (content=null, finish_reason=length) + 250 headroom for the tiny
+    # JSON action. Do NOT shrink this to save money without review: a
+    # smaller cap truncates the model's reasoning, not its bill.
+    per_tick_out_cap: int = 750
     max_model_calls: int = 400
-    dollar_cap: float = 4.00  # pre-registered; recomputed at launch
+    # Hard experiment budget: $4.50 is the smallest clean number above
+    # the $4.275 worst case (400 x (6000x$1.25 + 750x$4.25)/1M).
+    dollar_cap: float = 4.50
+    # Consecutive empty model responses (content=null, e.g. reasoning
+    # exhausted the output cap) before the run ends as a technical
+    # stop. 4 bounds the waste at ~$0.04 while tolerating one unlucky
+    # tick; 4-in-a-row signals a systematic problem, not noise.
+    max_empty_streak: int = 4
     tick_interval_seconds: int = 120
     wake_check_seconds: int = 900
     model_temperature: float = 0.7  # pre-registered model-call parameter
@@ -493,7 +522,7 @@ class Phase2Runner:
                 "name": name, "key": key, "pk": pk,
                 "brief": briefs[name], "furnace_xy": (x, y),
                 "farm_id": r["id"], "actions": 0, "tick_seq": 0,
-                "wait_until": 0, "next_wake": 0,
+                "wait_until": 0, "next_wake": 0, "empty_streak": 0,
             })
         self.log({
             "event": "run_start",
@@ -958,6 +987,30 @@ class Phase2Runner:
                       "spend_dollars": round(self.dollars(), 4),
                       "dollar_cap": self.cfg.dollar_cap})
             return "halt"
+        if text is None or (isinstance(text, str) and not text.strip()):
+            # Empty model response (e.g. reasoning exhausted the
+            # output cap: content=null, finish_reason=length). The
+            # billed call and its usage are already recorded above;
+            # this is a survivable no_action technical event — NEVER
+            # a crash. No world action is produced.
+            agent["empty_streak"] = agent.get("empty_streak", 0) + 1
+            streak = agent["empty_streak"]
+            self.log({"event": "tick_empty_response",
+                      "agent": agent["name"],
+                      "action": "no_action",
+                      "reason": "empty_model_content",
+                      "empty_streak": streak,
+                      "max_empty_streak": self.cfg.max_empty_streak,
+                      "in_tokens": tin, "out_tokens": tout,
+                      "spend_dollars": round(self.dollars(), 4)})
+            if streak >= self.cfg.max_empty_streak:
+                self.log({"event": "technical_stop",
+                          "reason": "consecutive_empty_responses",
+                          "agent": agent["name"],
+                          "empty_streak": streak})
+                return "halt"
+            return "ok"
+        agent["empty_streak"] = 0  # any content resets the streak
         try:
             action = json.loads(text)
             assert isinstance(action, dict) and "action" in action
@@ -1009,6 +1062,16 @@ class Phase2Runner:
                 if all_capped:
                     reason = "all_agents_capped"
                     break
+        except Exception as e:  # noqa: BLE001 - harness must record this
+            # An abnormal exit (e.g. the 2026-10-07 tick-1 TypeError on
+            # null model content) must NEVER be reported as
+            # "loop_complete": the evidence log must say what happened.
+            # Re-raised after recording so the operator still sees a
+            # nonzero exit; the archive is finalized in `finally`.
+            self.log({"event": "run_exception",
+                      "error": f"{type(e).__name__}: {e}"[:300]})
+            reason = "run_exception"
+            raise
         finally:
             self.finalize_archive(reason)
 
@@ -1092,7 +1155,7 @@ class Phase2Runner:
                 "furnace_xy": (0, 0), "farm_id": None,
                 "actions": astate["actions"],
                 "tick_seq": astate["tick_seq"],
-                "wait_until": 0, "next_wake": 0,
+                "wait_until": 0, "next_wake": 0, "empty_streak": 0,
             })
         # Re-resolve farm ids from the restored world (public census).
         structs = runner.client.get("/world/structures").json()
@@ -1253,7 +1316,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ticks", type=int, default=4,
                     help="dry-run tick budget (ignored for real runs)")
     ap.add_argument("--max-actions", type=int, default=150)
-    ap.add_argument("--dollar-cap", type=float, default=4.00)
+    ap.add_argument("--dollar-cap", type=float, default=4.50)
     ap.add_argument("--archive", type=str, default=None,
                     help="evidence archive directory "
                          "(default: fresh temp dir)")
@@ -1276,7 +1339,7 @@ def main(argv: list[str] | None = None) -> int:
                     dollar_cap=args.dollar_cap,
                     tick_interval_seconds=0 if args.dry_run else 120)
     try:
-        adapter = build_adapter(args.dry_run)
+        adapter = build_adapter(args.dry_run, cfg)
     except AdapterConfigError as e:
         print(f"[phase2-runner] FATAL: {e}", file=sys.stderr)
         print("[phase2-runner] refusing to start: a non-dry-run "
