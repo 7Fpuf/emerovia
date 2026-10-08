@@ -350,19 +350,25 @@ models, cadence, recording, and budget before any launch decision.)
   chain-of-thought: anything outside the stated field and API-visible
   state is not evidence for §4.3 classification.
 - **Inference budget and cost cap.** Per-tick input capped at 6,000
-  tokens (state summarization + truncation), output ≤ 750 tokens
-  (resized 2026-10-07 from 500: the tick-1 launch abort showed
-  muse-spark-1.3 burning the full 500-token output budget on
-  reasoning and returning content=null; 750 = 500 observed reasoning
-  burn + 250 headroom for the tiny JSON action). Max 400 model calls
+  tokens (state summarization + truncation), output ≤ 1,500 tokens.
+  Parameter history: 500 at preflight (2026-10-06) → 750 after the
+  2026-10-07 tick-1 abort (the model exhausted the 500-token output
+  allowance with content=null; 750 = inferred reasoning burn + 250
+  headroom) → 1,500 after the 2026-10-07 response-budget calibration
+  (see `phase2/calibration-2026-10-07-README.md`: on the exact
+  first-tick prompt, 1,000 tokens failed 3/3 while 1,500 produced 3/3
+  valid actionable JSON responses; measured reasoning need
+  ~670–1,000 tokens, visible action ~50 tokens). Max 400 model calls
   total (2 agents × 200 — covers 150 actions plus deliberation and
-  wake-checks) → **≤ 2.4M input + ≤ 300k output tokens**. At the
+  wake-checks) → **≤ 2.4M input + ≤ 600k output tokens**. At the
   pinned rates (re-verified 2026-10-07: $1.25/$4.25 per M):
-  2.4 × $1.25 + 0.3 × $4.25 = **$4.275 maximum theoretical spend**.
-  Expected realistic run: ~300 calls × ~2k in / ~0.5k out ≈
-  **~$1.40**. **Pre-registered dollar cap: $4.50** — the smallest
-  clean number above the $4.275 worst case (the token caps bind
-  regardless). The
+  2.4 × $1.25 + 0.6 × $4.25 = **$5.55 maximum theoretical spend**.
+  Expected realistic run: ~300 calls ≈ **~$1.51**.
+  **Pre-registered dollar cap: $6.00** — the smallest clean number
+  above the $5.55 worst case (~8% margin; the token caps bind
+  regardless). The $6.00 cap bounds the runner's own spend under the
+  stated rates; it is not a guarantee of account-wide limits or
+  charges outside the runner. The
   harness checks the cap BEFORE every model call using worst-case
   next-call cost and halts if the cap would be breached — logged as a
   technical stop (§3.6), never as an economic finding. No inference
@@ -405,7 +411,7 @@ methodology; three operational gaps were closed (see
    startup — the scripted stub is dry-run-only, never a silent
    fallback.
 2. **Hard budget enforcement at the API boundary:** pre-send
-   rejection of oversize prompts; `max_tokens=750` on every request;
+   rejection of oversize prompts; `max_tokens=1500` on every request;
    real billed `usage` accounted at face value (never clipped);
    $4.00 cap checked before AND after every call (both halt as
    technical stops); action cap counts every signed attempt

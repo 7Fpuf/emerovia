@@ -7,7 +7,7 @@ Covers the 2026-10-07 tick-1 abort fix (ChatGPT two-change spec):
 2. A bounded consecutive-empty-response rule ends the run as a
    technical stop before it can waste the budget.
 3. Revised budget enforcement under the resized per-tick output cap
-   (750) and hard cap ($4.50).
+   (1500) and hard cap ($6.00).
 4. An abnormal run exit is never reported as "loop_complete".
 
 HARD BOUNDARIES: no live model calls, no inference spend, no
@@ -49,7 +49,7 @@ class NullContentAdapter(pr.ModelAdapter):
     name = "test-null-content"
     enforces_limits = True
 
-    def __init__(self, script=None, in_tok=915, out_tok=750):
+    def __init__(self, script=None, in_tok=915, out_tok=1500):
         self.script = list(script) if script is not None else [None]
         self.i = 0
         self.in_tok = in_tok
@@ -70,7 +70,7 @@ def test_empty_response_none_is_no_action_not_crash(tmp_path):
     def fake_transport(url, headers, payload, timeout):
         return {"choices": [{"message": {"content": None,
                                          "finish_reason": "length"}}],
-                "usage": {"prompt_tokens": 915, "completion_tokens": 750}}
+                "usage": {"prompt_tokens": 915, "completion_tokens": 1500}}
 
     runner = make_runner(tmp_path)
     runner.adapter = pr.PinnedModelAdapter(
@@ -79,7 +79,7 @@ def test_empty_response_none_is_no_action_not_crash(tmp_path):
     try:
         assert runner.tick(runner.agents[0]) == "ok"  # NOT a crash
         assert runner.model_calls == 1
-        assert (runner.spend_in, runner.spend_out) == (915, 750)
+        assert (runner.spend_in, runner.spend_out) == (915, 1500)
         assert runner.agents[0]["actions"] == 0  # no world action
         assert runner.agents[0]["tick_seq"] == 0
         evs = read_events(runner)
@@ -89,7 +89,7 @@ def test_empty_response_none_is_no_action_not_crash(tmp_path):
         assert empties[0]["action"] == "no_action"
         assert empties[0]["empty_streak"] == 1
         assert empties[0]["in_tokens"] == 915
-        assert empties[0]["out_tokens"] == 750
+        assert empties[0]["out_tokens"] == 1500
         budgets = [e for e in evs if e.get("event") == "budget_record"]
         assert budgets and budgets[0]["in_tokens"] == 915
         # no signed-action tick record was produced
@@ -120,16 +120,16 @@ def test_billed_out_at_cap_is_not_an_anomaly(tmp_path):
     cap must flow into the empty-response path, not halt the run."""
     def fake_transport(url, headers, payload, timeout):
         return {"choices": [{"message": {"content": None}}],
-                "usage": {"prompt_tokens": 915, "completion_tokens": 750}}
+                "usage": {"prompt_tokens": 915, "completion_tokens": 1500}}
 
     a = pr.PinnedModelAdapter(api_url="http://x", api_key="k",
                               transport=fake_transport)
     text, tin, tout = a.complete("hi")
-    assert text is None and (tin, tout) == (915, 750)  # no raise
+    assert text is None and (tin, tout) == (915, 1500)  # no raise
 
     def bad_transport(url, headers, payload, timeout):
         return {"choices": [{"message": {"content": None}}],
-                "usage": {"prompt_tokens": 915, "completion_tokens": 751}}
+                "usage": {"prompt_tokens": 915, "completion_tokens": 1501}}
 
     b = pr.PinnedModelAdapter(api_url="http://x", api_key="k",
                               transport=bad_transport)
@@ -142,6 +142,10 @@ def test_billed_out_at_cap_is_not_an_anomaly(tmp_path):
 
 def test_consecutive_empty_responses_halt_at_bound(tmp_path):
     runner = make_runner(tmp_path)  # max_empty_streak=4 default
+    # The 4-empty safeguard stays active under the 1500/$6.00 config.
+    assert runner.cfg.per_tick_out_cap == 1500
+    assert runner.cfg.dollar_cap == 6.00
+    assert runner.cfg.max_empty_streak == 4
     runner.adapter = NullContentAdapter()  # always None
     runner.setup_world()
     try:
@@ -196,19 +200,44 @@ def test_custom_empty_streak_bound(tmp_path):
 
 
 def test_budget_precheck_uses_resized_caps(tmp_path):
-    runner = make_runner(tmp_path)  # dollar_cap=4.50 default
-    worst = 6000 / 1e6 * 1.25 + 750 / 1e6 * 4.25
-    assert worst == pytest.approx(0.0106875)  # worst-case next call
-    assert 400 * worst == pytest.approx(4.275)  # < $4.50 hard cap
+    runner = make_runner(tmp_path)  # dollar_cap=6.00 default
+    assert runner.cfg.dollar_cap == 6.00
+    assert runner.cfg.per_tick_out_cap == 1500
+    worst = 6000 / 1e6 * 1.25 + 1500 / 1e6 * 4.25
+    assert worst == pytest.approx(0.013875)  # worst-case next call
+    assert 400 * worst == pytest.approx(5.55)  # < $6.00 hard cap
     assert runner.check_budget_before_call() is True
     # Push spend so the worst-case next call no longer fits.
-    target = 4.50 - worst + 0.001
+    target = 6.00 - worst + 0.001
     runner.spend_out = int(target / 4.25 * 1e6)
     assert runner.check_budget_before_call() is False
     evs = read_events(runner)
     assert any(e.get("event") == "technical_stop"
                and e.get("reason") == "budget_cap_reached" for e in evs)
     runner.logf.close()
+
+
+def test_budget_hard_stop_post_call_at_600(tmp_path):
+    """Defense in depth under the $6.00 cap: even if the pre-call
+    check passed, billed spend past the cap halts immediately as a
+    technical stop, with the cap recorded as 6.00."""
+    runner = make_runner(tmp_path)  # dollar_cap=6.00 default
+    runner.adapter = NullContentAdapter(in_tok=6000, out_tok=1500)
+    runner.setup_world()
+    try:
+        # Bypass the pre-call gate to exercise the post-call layer.
+        runner.check_budget_before_call = lambda: True
+        # Pre-seed spend so one maxed-out call breaches $6.00.
+        runner.spend_out = int(5.99 / 4.25 * 1e6)
+        assert runner.tick(runner.agents[0]) == "halt"
+        evs = read_events(runner)
+        stops = [e for e in evs
+                 if e.get("event") == "technical_stop"
+                 and e.get("reason") == "budget_cap_exceeded"]
+        assert len(stops) == 1
+        assert stops[0]["dollar_cap"] == 6.00
+    finally:
+        runner.logf.close()
 
 
 def test_build_adapter_wires_config_caps(monkeypatch):
@@ -221,20 +250,20 @@ def test_build_adapter_wires_config_caps(monkeypatch):
         return {"choices": [{"message": {"content": "{}"}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
 
-    cfg = pr.RunConfig()  # resized defaults: 750 out
+    cfg = pr.RunConfig()  # resized defaults: 1500 out, $6.00 cap
     a = pr.build_adapter(False, cfg)
     assert isinstance(a, pr.PinnedModelAdapter)
-    assert a.per_tick_out_cap == 750
+    assert a.per_tick_out_cap == 1500
     a.transport = fake_transport
     a.complete("hi")
-    assert seen["max_tokens"] == 750  # wire cap == config cap
+    assert seen["max_tokens"] == 1500  # wire cap == config cap
 
     cfg2 = pr.RunConfig(per_tick_out_cap=1234)
     a2 = pr.build_adapter(False, cfg2)
     assert a2.per_tick_out_cap == 1234  # custom caps propagate
 
     a3 = pr.build_adapter(False)  # legacy call shape still works
-    assert a3.per_tick_out_cap == 750
+    assert a3.per_tick_out_cap == 1500
 
 
 # --------------------------------------- 4. honest run_end reasons

@@ -228,7 +228,9 @@ class PinnedModelAdapter(ModelAdapter):
     in the provider's billing console, put a hard spend limit / budget
     alert at or below the experiment cap on a DEDICATED experiment API
     key before launch, and never reuse a general-purpose key for the
-    pilot. The runner's in-code $4.50 cap is the primary safeguard; the
+    pilot. The runner's in-code $6.00 cap is the primary safeguard
+    (it bounds the runner's own spend under the stated rates, not
+    account-wide charges); the
     provider-side limit is the backstop. Console steps are provider-
     specific — verify them at launch, do not assume a UI path."""
 
@@ -239,13 +241,15 @@ class PinnedModelAdapter(ModelAdapter):
                  api_key: str | None = None,
                  model: str = PINNED_MODEL,
                  per_tick_in_cap: int = 6000,
-                 # 750: resized from 500 after the 2026-10-07 tick-1 abort,
-                 # where muse-spark-1.3 burned the full 500-token output
-                 # budget on reasoning (content=null,
-                 # finish_reason=length). 500 observed reasoning burn +
-                 # 250 headroom for the tiny JSON action. Keep in sync
-                 # with RunConfig.per_tick_out_cap (main() wires them).
-                 per_tick_out_cap: int = 750,
+                 # 1500: resized from 750 after the 2026-10-07
+                 # response-budget calibration: on the exact first-tick
+                 # prompt, output ceilings of 500, 750 and 1000 were all
+                 # exhausted with zero visible content, while 1500
+                 # produced 3/3 valid actionable JSON responses (measured
+                 # reasoning need ~670-1000 tokens; the visible JSON
+                 # action is ~50 tokens). Keep in sync with
+                 # RunConfig.per_tick_out_cap (main() wires them).
+                 per_tick_out_cap: int = 1500,
                  temperature: float = 0.7,
                  timeout_s: int = 120,
                  transport=None):
@@ -353,15 +357,20 @@ class RunConfig:
     max_actions_per_agent: int = 150
     max_wall_seconds: int = 6 * 3600
     per_tick_in_cap: int = 6000
-    # 750 = 500 observed reasoning burn on the 2026-10-07 tick-1 abort
-    # (content=null, finish_reason=length) + 250 headroom for the tiny
-    # JSON action. Do NOT shrink this to save money without review: a
-    # smaller cap truncates the model's reasoning, not its bill.
-    per_tick_out_cap: int = 750
+    # 1500 = smallest ladder-tested ceiling that works on the exact
+    # first-tick prompt (2026-10-07 calibration: 3/3 failures at 1000,
+    # 3/3 valid actionable JSON at 1500 without hitting the ceiling;
+    # measured reasoning need ~670-1000 tokens, visible action ~50).
+    # Do NOT change this to save money without review: a smaller cap
+    # truncates the model's reasoning, not its bill.
+    per_tick_out_cap: int = 1500
     max_model_calls: int = 400
-    # Hard experiment budget: $4.50 is the smallest clean number above
-    # the $4.275 worst case (400 x (6000x$1.25 + 750x$4.25)/1M).
-    dollar_cap: float = 4.50
+    # Hard experiment budget: $6.00 is the smallest clean number above
+    # the $5.55 worst case (400 x (6000x$1.25 + 1500x$4.25)/1M), ~8%
+    # margin. This cap bounds the RUNNER's own spend under the stated
+    # rates; it is not a guarantee of account-wide limits or charges
+    # outside the runner.
+    dollar_cap: float = 6.00
     # Consecutive empty model responses (content=null, e.g. reasoning
     # exhausted the output cap) before the run ends as a technical
     # stop. 4 bounds the waste at ~$0.04 while tolerating one unlucky
@@ -1316,7 +1325,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ticks", type=int, default=4,
                     help="dry-run tick budget (ignored for real runs)")
     ap.add_argument("--max-actions", type=int, default=150)
-    ap.add_argument("--dollar-cap", type=float, default=4.50)
+    ap.add_argument("--dollar-cap", type=float, default=6.00)
     ap.add_argument("--archive", type=str, default=None,
                     help="evidence archive directory "
                          "(default: fresh temp dir)")

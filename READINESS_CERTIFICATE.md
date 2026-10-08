@@ -9,6 +9,44 @@ accepted in that review and are NOT reopened here.
 
 ---
 
+## 0. Parameter addendum — 2026-10-07 (LIVE parameters)
+
+The §2–§3 figures below (`max_tokens=500`, $4.00 cap) are the dated
+2026-10-06 preflight record and are NOT the live parameters. Two
+approved changes followed, under the freeze's material-blocker
+exception (ChatGPT reviewed both; Trevor approved both):
+
+1. **2026-10-07, commit `f02e4f2a`** — the tick-1 launch abort (the
+   model exhausted the 500-token output allowance with
+   `content=null`; the runner crashed on an unhandled `TypeError`)
+   forced an empty-response fix plus a resize to 750 out / $4.50 cap.
+2. **2026-10-07, this commit** — the 750-token retry ended in a
+   technical stop (7/7 calls exhausted the allowance, zero visible
+   content; $0.0303 of $4.50 spent). A separate response-budget
+   calibration on the exact first-tick prompt (see
+   `phase2/calibration-2026-10-07-README.md`: 1,000 tokens failed
+   3/3, 1,500 produced 3/3 valid actionable JSON responses;
+   measured reasoning need ~670–1,000 tokens) set the live
+   parameters:
+
+- **Live per-call output ceiling: 1,500 tokens** (`max_tokens=1500`
+  on every request; ≤6,000 in / ≤1,500 out per tick; ≤400 calls).
+- **Live hard experiment budget: $6.00** — the smallest clean number
+  above the $5.55 theoretical max
+  (400 × (6000×$1.25 + 1500×$4.25)/1M), ~8% margin. Expected
+  realistic: ~$1.51. The cap bounds the runner's own spend under the
+  stated rates ($1.25/$4.25 per M, re-verified 2026-10-07); it is not
+  a guarantee of account-wide limits or charges outside the runner.
+- The 4-consecutive-empty-response technical stop remains active.
+  Frozen briefs, economics, objectives, season, model
+  (`muse-spark-1.3`), methodology, temperature, input cap, action
+  cap (150/agent), and 6-hour wall clock are unchanged.
+
+The "code frozen" statement in §1 refers to the preflight
+certificate; the two commits above are the reviewed exceptions.
+
+---
+
 ## 1. Exact runnable command + commit
 
 - **Branch:** `review/economic-infrastructure-spec`
