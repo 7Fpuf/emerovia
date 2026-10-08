@@ -16,6 +16,7 @@ uses the scripted stub against a temp-DB world.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -285,16 +286,268 @@ def test_prompt_carries_full_observation_pipeline(tmp_path):
     runner.setup_world()
     try:
         p = runner.build_prompt(runner.agents[0])
-        for section in ("core_state", "open_trade_offers", "recent_chat",
-                        "own_structures", "nearby_disclosed_tiles",
-                        "recent_filled_trades", "agents_visible",
-                        "public_recipes"):
+        for section in ("core_state", "recent_actions", "open_trade_offers",
+                        "recent_chat", "own_structures", "own_discoveries",
+                        "nearby_disclosed_tiles", "recent_filled_trades",
+                        "agents_visible", "public_recipes"):
             assert f"[{section}]" in p, section
         assert pr.estimate_tokens(p) <= runner.cfg.per_tick_in_cap
         # winter season info is ordinary public planning info
         assert "winter" in p.lower()
+        # CONTENT, not just headings (2026-10-08: the farmer's
+        # own_structures rendered [] for the whole pilot because the
+        # runner filtered on owner_pubkey / read slots — fields the
+        # endpoint never returns).
+        agent = runner.agents[0]
+        structs = json.loads(_section(p, "own_structures"))
+        farms = [s for s in structs if s.get("kind") == "farm"]
+        assert len(farms) == 1, structs
+        farm = farms[0]
+        assert farm["name"] == f"{agent['name']} farm"
+        assert farm["id"] == agent["farm_id"]
+        plots = farm["plots"]
+        assert len(plots) == 4
+        assert {pl["slot"] for pl in plots} == {0, 1, 2, 3}
+        assert all(pl["state"] == "empty" for pl in plots), plots
+        # the agent's own furnace is visible too
+        kinds = {s.get("kind") for s in structs}
+        assert "furnace" in kinds, kinds
     finally:
         runner.logf.close()
+
+
+def _section(prompt: str, name: str) -> str:
+    """Extract one [name] section's body from a built prompt."""
+    marker = f"[{name}]\n"
+    start = prompt.index(marker) + len(marker)
+    nxt = prompt.find("\n[", start)
+    return prompt[start:] if nxt == -1 else prompt[start:nxt]
+
+
+# ---------------------------------------------------------------- 5.
+# observation interface (harness 0.2.0 / prompt variant obs-interface-v1)
+
+
+def test_planted_slot_visible_as_growing_in_next_prompt(tmp_path):
+    """The milestone primitive: after a successful plant, the NEXT
+    prompt shows that slot as occupied/growing — the agent can see
+    the consequence of its own action."""
+    runner = make_runner(tmp_path)
+    runner.adapter = FixedBilledAdapter(
+        script=({"action": "farm_plant", "params": {"slot": 0},
+                 "reasoning": "test: plant slot 0"},))
+    runner.setup_world()
+    try:
+        agent = runner.agents[0]
+        assert runner.tick(agent) == "ok"
+        evs = read_events(runner)
+        tick = [e for e in evs if e.get("event") == "tick"
+                and e.get("action") == "farm_plant"][-1]
+        assert tick["http_status"] == 200, tick
+        p = runner.build_prompt(agent)
+        structs = json.loads(_section(p, "own_structures"))
+        farm = [s for s in structs if s.get("kind") == "farm"][0]
+        states = {pl["slot"]: pl["state"] for pl in farm["plots"]}
+        assert states[0] == "growing", states
+        assert all(states[i] == "empty" for i in (1, 2, 3)), states
+        # the successful plant is also in the action history
+        hist = json.loads(_section(p, "recent_actions"))
+        assert hist[-1]["action"] == "farm_plant"
+        assert hist[-1]["http_status"] == 200
+    finally:
+        runner.logf.close()
+
+
+def test_rejected_plant_error_visible_in_next_prompt(tmp_path):
+    """The 2026-10-08 failure mode: eight 400 rejections the agent
+    never saw. Now the error detail reaches the next prompt."""
+    runner = make_runner(tmp_path)
+    runner.adapter = FixedBilledAdapter(
+        script=({"action": "farm_plant", "params": {"slot": 0},
+                 "reasoning": "test: plant slot 0"},))
+    runner.setup_world()
+    try:
+        agent = runner.agents[0]
+        assert runner.tick(agent) == "ok"   # plant succeeds
+        assert runner.tick(agent) == "ok"   # same slot -> 400
+        evs = read_events(runner)
+        rej = [e for e in evs if e.get("event") == "tick"
+               and e.get("http_status") == 400]
+        assert rej, "expected a 400 rejection"
+        assert "growing, not empty" in rej[-1]["response"]
+        p = runner.build_prompt(agent)
+        hist = json.loads(_section(p, "recent_actions"))
+        assert len(hist) == 2
+        assert hist[0]["http_status"] == 200
+        last = hist[-1]
+        assert last["action"] == "farm_plant"
+        assert last["params"] == {"slot": 0}
+        assert last["http_status"] == 400
+        assert "growing, not empty" in last["response"]
+        # and the prompt's world state agrees: slot 0 is growing
+        structs = json.loads(_section(p, "own_structures"))
+        farm = [s for s in structs if s.get("kind") == "farm"][0]
+        states = {pl["slot"]: pl["state"] for pl in farm["plots"]}
+        assert states[0] == "growing"
+    finally:
+        runner.logf.close()
+
+
+def test_action_history_bounded(tmp_path):
+    """recent_actions keeps only the last RECENT_ACTIONS_KEPT entries."""
+    runner = make_runner(tmp_path)
+    runner.adapter = FixedBilledAdapter(
+        script=({"action": "chat", "params": {"text": "t"},
+                 "reasoning": "test"},))
+    runner.setup_world()
+    try:
+        agent = runner.agents[0]
+        for _ in range(pr.RECENT_ACTIONS_KEPT + 3):
+            assert runner.tick(agent) == "ok"
+        assert len(agent["recent_actions"]) == pr.RECENT_ACTIONS_KEPT
+        p = runner.build_prompt(agent)
+        hist = json.loads(_section(p, "recent_actions"))
+        assert len(hist) == pr.RECENT_ACTIONS_KEPT
+    finally:
+        runner.logf.close()
+
+
+def test_movement_and_discoveries_visible_across_prompts(tmp_path):
+    """Movement results and visited tiles are observable across
+    consecutive prompts: the agent can see where it went."""
+    runner = make_runner(tmp_path)
+    runner.adapter = FixedBilledAdapter(script=[
+        {"action": "move", "params": {"dir": d}, "reasoning": "test"}
+        for d in ("E", "S", "W", "N")])
+    runner.setup_world()
+    try:
+        agent = runner.agents[0]
+        p0 = runner.build_prompt(agent)
+        d0 = json.loads(_section(p0, "own_discoveries"))
+        for _ in range(4):
+            assert runner.tick(agent) == "ok"
+        evs = read_events(runner)
+        moves = [e for e in evs if e.get("event") == "tick"
+                 and e.get("action") == "move"]
+        assert moves, "no moves recorded"
+        ok_moves = [m for m in moves if m["http_status"] == 200]
+        assert ok_moves, "no successful move to observe"
+        p1 = runner.build_prompt(agent)
+        hist = json.loads(_section(p1, "recent_actions"))
+        assert len(hist) == 4
+        d1 = json.loads(_section(p1, "own_discoveries"))
+        assert len(d1) >= len(d0)
+        seen = {(d["x"], d["y"]) for d in d1}
+        for m in ok_moves:
+            assert tuple(m["pos_after"]) in seen, (m, seen)
+            entry = [h for h in hist
+                     if h.get("tick_seq") == m["tick_seq"]][0]
+            assert tuple(entry["pos_after"]) == tuple(m["pos_after"])
+    finally:
+        runner.logf.close()
+
+
+def test_discoveries_endpoint_is_private_per_agent(tmp_path):
+    """GET /world/discoveries: signed read, returns ONLY the caller's
+    own tiles. No parameter can reach another agent's history."""
+    runner = make_runner(tmp_path)
+    runner.setup_world()
+    try:
+        T = runner.T
+        a, b = runner.agents
+        # Spawn records the spawn tile, so snapshot b's tiles first.
+        db_before = {(d["x"], d["y"])
+                     for d in runner._signed_get(b["key"],
+                                                  "/world/discoveries")}
+        da_before = {(d["x"], d["y"])
+                     for d in runner._signed_get(a["key"],
+                                                  "/world/discoveries")}
+        moved = False
+        for d in ("E", "S", "W", "N"):
+            try:
+                T.signed_request(runner.client, a["key"], "POST",
+                                 "/world/move", {"dir": d})
+                moved = True
+                break
+            except AssertionError:
+                continue
+        assert moved, "no legal move found from spawn"
+        da = runner._signed_get(a["key"], "/world/discoveries")
+        assert isinstance(da, list) and len(da) >= 1, da
+        assert all(set(d) >= {"x", "y", "terrain", "discovered_at"}
+                   for d in da)
+        new_a = {(d["x"], d["y"]) for d in da} - da_before
+        db = runner._signed_get(b["key"], "/world/discoveries")
+        # b sees only its own tiles: none of a's NEW tiles leak, and
+        # b's set is unchanged by a's movement.
+        assert new_a, "a's move recorded no new tile"
+        assert not (new_a & {(d["x"], d["y"]) for d in db})
+        assert {(d["x"], d["y"]) for d in db} == db_before
+        # unsigned read is refused
+        r = runner.client.get("/world/discoveries")
+        assert r.status_code == 401, r.status_code
+        # limit is honored and bounded
+        few = runner._signed_get(a["key"], "/world/discoveries",
+                                 {"limit": 1})
+        assert len(few) == 1
+    finally:
+        runner.logf.close()
+
+
+def test_call_records_persisted_with_hashes_and_verified(tmp_path):
+    """Every model call's exact prompt, raw response, parsed action
+    and result are persisted with SHA-256 and join the verified
+    archive. No key material in the records."""
+    rc = pr.main(["--dry-run", "--ticks", "2",
+                  "--archive", str(tmp_path / "a")])
+    assert rc == 0
+    arch = tmp_path / "a"
+    calls = sorted((arch / "calls").glob("call_*.json"))
+    assert len(calls) == 2, [p.name for p in calls]
+    for p in calls:
+        r = json.loads(p.read_text())
+        assert r["prompt"] and r["raw_response"]
+        assert (hashlib.sha256(r["prompt"].encode()).hexdigest()
+                == r["prompt_sha256"])
+        assert (hashlib.sha256((r["raw_response"] or "").encode()).hexdigest()
+                == r["raw_response_sha256"])
+        assert r["prompt_variant"] == pr.PROMPT_VARIANT
+        assert r["harness"] == pr.HARNESS_VERSION
+        assert r["parsed_action"] is not None
+        assert r["action_result"] is not None
+        blob = json.dumps(r).lower()
+        assert "privkey" not in blob and "private" not in blob
+    manifest = json.loads((arch / "manifest.json").read_text())
+    assert manifest["prompt_variant"] == pr.PROMPT_VARIANT
+    assert any(n.startswith("calls/") for n in manifest["files"])
+    report = pr.verify_archive(arch)
+    assert report["ok"], report["errors"]
+
+
+def test_resume_restores_farm_id_and_action_history(tmp_path):
+    """Resume re-resolves the farm (regression: the old owner_pubkey
+    filter left farm_id None) and rebuilds the bounded action
+    history from the archived tick records."""
+    arch = tmp_path / "a"
+    assert pr.main(["--dry-run", "--ticks", "4",
+                    "--archive", str(arch)]) == 0
+    resumed = pr.Phase2Runner.resume(
+        arch, pr.RunConfig(dry_run=True), pr.StubAdapter())
+    try:
+        for a in resumed.agents:
+            assert a["farm_id"] is not None, a["name"]
+            assert len(a["recent_actions"]) > 0, a["name"]
+            entry = a["recent_actions"][-1]
+            assert entry["http_status"] in (200, 400, "rejected",
+                                            "n/a(wait)"), entry
+        # the resumed run's prompts carry the restored memory
+        p = resumed.build_prompt(resumed.agents[0])
+        hist = json.loads(_section(p, "recent_actions"))
+        assert len(hist) > 0
+        structs = json.loads(_section(p, "own_structures"))
+        assert any(s.get("kind") == "farm" for s in structs)
+    finally:
+        resumed.logf.close()
 
 
 def test_prompt_truncation_under_cap(tmp_path):
@@ -567,3 +820,31 @@ def test_objectives_not_trusted_from_claims(tmp_path):
     authoritative world DB, and an empty world is never 'complete'."""
     runner = make_runner(tmp_path)
     assert runner.objectives_complete() is None  # no agents/world yet
+
+
+def test_null_content_call_record_has_no_action(tmp_path):
+    """A null-content (empty) model call still gets an exact evidence
+    record: prompt hashed, raw response null, no_action result."""
+
+    class NullAdapter(pr.ModelAdapter):
+        name = "test-null"
+        enforces_limits = True
+
+        def complete(self, prompt):
+            return None, 915, 1500
+
+    runner = make_runner(tmp_path)
+    runner.adapter = NullAdapter()
+    runner.setup_world()
+    try:
+        assert runner.tick(runner.agents[0]) == "ok"
+        recs = sorted((runner.archive_dir / "calls").glob("call_*.json"))
+        assert len(recs) == 1
+        r = json.loads(recs[0].read_text())
+        assert r["raw_response"] is None
+        assert (hashlib.sha256(b"").hexdigest()
+                == r["raw_response_sha256"])
+        assert r["parsed_action"] is None
+        assert r["action_result"]["reason"] == "empty_model_content"
+    finally:
+        runner.logf.close()

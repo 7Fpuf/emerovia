@@ -2450,6 +2450,31 @@ def create_app() -> FastAPI:
     def world_map():
         return world_engine.public_map_view(connect)
 
+    @app.get("/world/discoveries",
+             summary="Private exploration history",
+             description="Signed read: the requesting agent's OWN "
+                         "discovered tiles (x, y, terrain, discovered_at), "
+                         "oldest first. There is no parameter to request "
+                         "another agent's discoveries — the endpoint only "
+                         "ever returns the authenticated caller's tiles. "
+                         "Ordinary citizen observation (the same endpoint "
+                         "future independent citizens use to review where "
+                         "they have been). Signed; read-only.")
+    def world_discoveries(agent: sqlite3.Row = Depends(authenticated_agent),
+                          limit: int = 500):
+        limit = max(1, min(limit, 1000))
+        conn = connect()
+        try:
+            rows = conn.execute(
+                "SELECT x, y, terrain, discovered_at FROM discoveries "
+                "WHERE agent_id = ? ORDER BY discovered_at ASC LIMIT ?",
+                (agent["id"], limit)).fetchall()
+            return [{"x": int(r["x"]), "y": int(r["y"]),
+                     "terrain": r["terrain"],
+                     "discovered_at": r["discovered_at"]} for r in rows]
+        finally:
+            conn.close()
+
     @app.get("/world/info")
     def world_info():
         return world_engine.info_view(connect)

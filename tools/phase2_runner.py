@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
-"""Phase 2 blind-discovery experiment runner (0.1.0).
+"""Phase 2 blind-discovery experiment runner (0.2.0).
 
 Runs the two experiment agents (exp-01 / exp-02) against a TEMPORARY
 Emerovia world database — never production. Each tick: GET world state
 -> prompt the model -> parse exactly ONE action -> sign and POST ->
 log everything to a signed evidence archive.
+
+Observation interface (0.2.0 / prompt variant "obs-interface-v1"):
+agents receive accurate world observations (their own structures with
+real plot states from the public census), a bounded history of their
+own recent actions WITH the actual results (including rejections),
+and their own private exploration history. This is observation only:
+the runner never tells an agent what to do, suggests strategies, or
+hints at trade/cooperation — it reports what happened and lets the
+agent decide.
 
 Boundaries (hard):
 - AC_DB_PATH is always a temp file. Production is never touched.
@@ -73,7 +82,25 @@ PINNED_MODEL = "muse-spark-1.3"
 RATE_IN_PER_M = 1.25
 RATE_OUT_PER_M = 4.25
 
-HARNESS_VERSION = "phase2-runner/0.1.1"
+HARNESS_VERSION = "phase2-runner/0.2.0"
+
+# Prompt/observation variant. "obs-interface-v1": accurate world
+# observations (the runner now reads the real /world/structures fields
+# owner_name/plots), a bounded per-agent action/result history, and the
+# agent's own private exploration history in every prompt, plus exact
+# per-call prompt/response evidence. Registered as a NEW variant:
+# earlier results stay labeled with the previous variant and are never
+# rewritten.
+PROMPT_VARIANT = "obs-interface-v1"
+
+# How many of the agent's own recent actions (with results) travel in
+# each prompt. Small and bounded: memory, not a transcript.
+RECENT_ACTIONS_KEPT = 5
+
+# How many of the agent's own discovered tiles travel in each prompt
+# (most recent). Bounded for prompt size; the full history stays in
+# the world DB and the signed /world/discoveries endpoint.
+DISCOVERIES_KEPT = 60
 
 ENV_API_URL = "PHASE2_MODEL_API_URL"
 ENV_API_KEY = "PHASE2_MODEL_API_KEY"
@@ -429,6 +456,16 @@ class Phase2Runner:
         self.logf.write(json.dumps(record) + "\n")
         self.logf.flush()
 
+    def _write_call_record(self, call_id: int, record: dict):
+        """Persist one model call's exact evidence: the prompt text
+        sent, the raw model response, the parsed action, and the
+        action result — each with SHA-256. No key material: prompts
+        carry briefs and world state only, never private keys."""
+        d = self.archive_dir / "calls"
+        d.mkdir(exist_ok=True)
+        (d / f"call_{call_id:04d}.json").write_text(
+            json.dumps(record, indent=1))
+
     def dollars(self) -> float:
         return (self.spend_in / 1e6 * RATE_IN_PER_M
                 + self.spend_out / 1e6 * RATE_OUT_PER_M)
@@ -532,10 +569,15 @@ class Phase2Runner:
                 "brief": briefs[name], "furnace_xy": (x, y),
                 "farm_id": r["id"], "actions": 0, "tick_seq": 0,
                 "wait_until": 0, "next_wake": 0, "empty_streak": 0,
+                # Bounded per-agent action history (own actions with
+                # their actual results); carried into each prompt as
+                # the [recent_actions] observation section.
+                "recent_actions": [],
             })
         self.log({
             "event": "run_start",
             "harness": HARNESS_VERSION,
+            "prompt_variant": PROMPT_VARIANT,
             "model": PINNED_MODEL,
             "model_adapter": self.adapter.name,
             "adapter_enforces_limits": self.adapter.enforces_limits,
@@ -582,11 +624,14 @@ class Phase2Runner:
         return body, dropped
 
     def build_prompt(self, agent: dict) -> str:
-        """Full ordinary public world information per protocol §7:
+        """Full ordinary world information per protocol §7:
         /world/me, /world/info (season/day), disclosed map window,
-        own structures incl. farm slot states, public recipes, agent
-        list, open trade offers, recent ledger, recent chat.
-        Navigational/operational info only — zero strategy hints."""
+        own structures incl. farm slot states, own private exploration
+        history, the agent's own recent actions with their actual
+        results, public recipes, agent list, open trade offers, recent
+        ledger, recent chat.
+        Observational/operational info only — zero strategy hints, no
+        trade/cooperation guidance, no suggested next actions."""
         T = self.T
         key = agent["key"]
         me = T.me(self.client, key)
@@ -604,14 +649,43 @@ class Phase2Runner:
              for t in pmap.get("tiles", [])
              if abs(t["x"] - mx) + abs(t["y"] - my) <= 6),
             key=lambda t: abs(t["x"] - mx) + abs(t["y"] - my))[:80]
-        # Public structure census, own structures only (farm slot
-        # growth stages are public per /world/structures).
+        # Public structure census, own structures only. The endpoint
+        # exposes owner_name (never owner_pubkey) and farm plot states
+        # as `plots` (never slots/growth/stage): match and read the
+        # REAL fields so the agent actually sees its own farm and can
+        # distinguish empty / growing / ready slots. (2026-10-08: the
+        # runner filtered on owner_pubkey and read slots, so this
+        # section was always [] — the farmer never saw its own farm.)
         structs = self.client.get("/world/structures").json()
-        own_structs = [
-            {k: s.get(k) for k in
-             ("id", "kind", "x", "y", "name", "slots", "growth", "stage")}
-            for s in (structs if isinstance(structs, list) else [])
-            if s.get("owner_pubkey") == agent["pk"]]
+        own_structs = []
+        for s in (structs if isinstance(structs, list) else []):
+            if s.get("owner_name") != agent["name"]:
+                continue
+            plots = s.get("plots")
+            own_structs.append({
+                "id": s.get("id"), "kind": s.get("kind"),
+                "x": s.get("x"), "y": s.get("y"),
+                "name": s.get("name"),
+                "plots": [
+                    {"slot": p.get("slot"), "state": p.get("state"),
+                     "growth_pct": p.get("growth_pct"),
+                     "ready_at": p.get("ready_at")}
+                    for p in (plots if isinstance(plots, list) else [])]})
+        # Private exploration history: the agent's OWN discovered tiles
+        # (signed read; the endpoint can only ever return the caller's
+        # tiles). Bounded to the most recent for prompt size.
+        try:
+            discs = self._signed_get(key, "/world/discoveries",
+                                     {"limit": 500})
+        except Exception:
+            discs = {"error": "discoveries unavailable"}
+        if isinstance(discs, dict):
+            own_discs = []
+        else:
+            own_discs = [
+                {"x": d.get("x"), "y": d.get("y"),
+                 "terrain": d.get("terrain")}
+                for d in discs[-DISCOVERIES_KEPT:]]
         # Public recipe book (signed read; public info).
         try:
             recipes = self._signed_get(key, "/world/recipes")
@@ -642,6 +716,11 @@ class Phase2Runner:
         }
         sections = [
             ("core_state", json.dumps(core)),
+            # The agent's own recent actions WITH their actual results
+            # (HTTP status, server response incl. errors, deltas).
+            # Pure observation: what happened, never what to do next.
+            ("recent_actions",
+             json.dumps(agent.get("recent_actions", []))),
             ("open_trade_offers", json.dumps([
                 {"id": o["id"], "maker": o.get("maker_name"),
                  "give": o.get("give"), "want": o.get("want")}
@@ -650,6 +729,7 @@ class Phase2Runner:
                 {"by": m.get("agent_name"), "text": str(m.get("text"))[:160]}
                 for m in (msgs if isinstance(msgs, list) else [])])),
             ("own_structures", json.dumps(own_structs)),
+            ("own_discoveries", json.dumps(own_discs)),
             ("nearby_disclosed_tiles", json.dumps(nearby)),
             ("recent_filled_trades", json.dumps(ledger)),
             ("agents_visible", json.dumps(
@@ -766,6 +846,7 @@ class Phase2Runner:
             for a in self.agents})
         manifest = {
             "harness": HARNESS_VERSION,
+            "prompt_variant": PROMPT_VARIANT,
             "model": PINNED_MODEL,
             "model_adapter": self.adapter.name,
             "run_reason": reason,
@@ -856,7 +937,8 @@ class Phase2Runner:
         reasoning = action.get("reasoning", "")
         rec = {"event": "tick", "agent": name, "action": act,
                "params": params, "stated_reasoning": reasoning[:500]}
-        ap_before = T.me(self.client, key)["ap"]
+        me_before = T.me(self.client, key)
+        ap_before = me_before["ap"]
         inv_before = T.inventory_of(self.db_path, agent["pk"])
         if act == "wait":
             mins = min(int(params.get("minutes", 1)), 120)
@@ -894,7 +976,9 @@ class Phase2Runner:
         else:
             rec["http_status"] = "rejected"
             rec["response"] = f"unknown action: {act}"
-        rec["ap_delta"] = round(T.me(self.client, key)["ap"] - ap_before, 2)
+        me_after = T.me(self.client, key)
+        rec["ap_delta"] = round(me_after["ap"] - ap_before, 2)
+        rec["pos_after"] = [me_after.get("x"), me_after.get("y")]
         inv_after = T.inventory_of(self.db_path, agent["pk"])
         rec["inventory_delta"] = {
             k: inv_after.get(k, 0) - inv_before.get(k, 0)
@@ -988,6 +1072,28 @@ class Phase2Runner:
                     "dollar_cap": self.cfg.dollar_cap}
         self.budget_calls.append(call_rec)
         self.log(call_rec)
+        # Exact per-call evidence: the prompt text sent and the raw
+        # model response, each hashed. (2026-10-08: the pilot archive
+        # had no prompts — the diagnosis had to be reconstructed from
+        # world state. From this variant on, every call is recorded.)
+        model_rec = {
+            "call": self.model_calls,
+            "agent": agent["name"],
+            "ts": time.time(),
+            "harness": HARNESS_VERSION,
+            "prompt_variant": PROMPT_VARIANT,
+            "prompt": prompt,
+            "prompt_sha256": hashlib.sha256(
+                prompt.encode()).hexdigest(),
+            "raw_response": text,
+            "raw_response_sha256": hashlib.sha256(
+                (text or "").encode()).hexdigest(),
+            "in_tokens": tin,
+            "out_tokens": tout,
+            "parsed_action": None,
+            "action_result": None,
+        }
+        self._write_call_record(self.model_calls, model_rec)
         if self.dollars() > self.cfg.dollar_cap:
             # Hard stop: a single call's billed usage pushed past the
             # cap. Halt immediately; never an economic finding.
@@ -1017,6 +1123,12 @@ class Phase2Runner:
                           "reason": "consecutive_empty_responses",
                           "agent": agent["name"],
                           "empty_streak": streak})
+            model_rec["action_result"] = {
+                "action": "no_action",
+                "reason": "empty_model_content",
+                "empty_streak": streak}
+            self._write_call_record(self.model_calls, model_rec)
+            if streak >= self.cfg.max_empty_streak:
                 return "halt"
             return "ok"
         agent["empty_streak"] = 0  # any content resets the streak
@@ -1028,12 +1140,35 @@ class Phase2Runner:
                       "agent": agent["name"],
                       "raw": text[:300],
                       "in_tokens": tin, "out_tokens": tout})
+            model_rec["action_result"] = {
+                "action": "no_action",
+                "reason": "parse_failure"}
+            self._write_call_record(self.model_calls, model_rec)
             return "ok"
         rec = self.execute_action(agent, action)
         rec.update({"in_tokens": tin, "out_tokens": tout,
                     "spend_dollars": round(self.dollars(), 4),
                     "model_calls": self.model_calls})
         self.log(rec)
+        # Bounded per-agent action history: the agent's own recent
+        # actions WITH their actual results (HTTP status, server
+        # response incl. errors, AP/inventory/position deltas). The
+        # next prompt carries what happened — never what to do next.
+        hist = agent.setdefault("recent_actions", [])
+        hist.append({
+            "tick_seq": rec.get("tick_seq"),
+            "action": rec.get("action"),
+            "params": rec.get("params"),
+            "http_status": rec.get("http_status"),
+            "response": rec.get("response"),
+            "ap_delta": rec.get("ap_delta"),
+            "inventory_delta": rec.get("inventory_delta"),
+            "pos_after": rec.get("pos_after"),
+        })
+        del hist[:-RECENT_ACTIONS_KEPT]
+        model_rec["parsed_action"] = action
+        model_rec["action_result"] = rec
+        self._write_call_record(self.model_calls, model_rec)
         return "ok"
 
     def run(self, max_additional_ticks: int | None = None):
@@ -1153,6 +1288,30 @@ class Phase2Runner:
         except (OSError, json.JSONDecodeError):
             runner.uncertain_billing = []
         runner._world_ready = True
+        # Rebuild each agent's bounded action history from the archived
+        # tick records so a resumed run's prompts carry the same memory
+        # the agent had when the run stopped. (Older archives' tick
+        # records lack pos_after — tolerated as null.)
+        hist_by_agent: dict[str, list[dict]] = {}
+        for line in (archive_dir / "run.jsonl").read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("event") == "tick":
+                hist_by_agent.setdefault(ev["agent"], []).append({
+                    "tick_seq": ev.get("tick_seq"),
+                    "action": ev.get("action"),
+                    "params": ev.get("params"),
+                    "http_status": ev.get("http_status"),
+                    "response": ev.get("response"),
+                    "ap_delta": ev.get("ap_delta"),
+                    "inventory_delta": ev.get("inventory_delta"),
+                    "pos_after": ev.get("pos_after"),
+                })
         for astate in state["agents"]:
             name = astate["name"]
             runner.agents.append({
@@ -1165,13 +1324,17 @@ class Phase2Runner:
                 "actions": astate["actions"],
                 "tick_seq": astate["tick_seq"],
                 "wait_until": 0, "next_wake": 0, "empty_streak": 0,
+                "recent_actions":
+                    hist_by_agent.get(name, [])[-RECENT_ACTIONS_KEPT:],
             })
         # Re-resolve farm ids from the restored world (public census).
+        # Match on owner_name: the endpoint exposes owner names, never
+        # pubkeys (the old owner_pubkey filter never matched).
         structs = runner.client.get("/world/structures").json()
         for a in runner.agents:
             farms = [s for s in structs
                      if s.get("kind") == "farm"
-                     and s.get("owner_pubkey") == a["pk"]]
+                     and s.get("owner_name") == a["name"]]
             a["farm_id"] = farms[0]["id"] if farms else None
         runner.log({"event": "run_resumed",
                     "harness": HARNESS_VERSION,
@@ -1241,6 +1404,50 @@ def verify_archive(archive_dir: Path) -> dict:
         for f in ("harness", "model", "brief_sha256", "dollar_cap",
                   "token_caps", "action_cap_per_agent"):
             check(f"run_start_has_{f}", f in rs)
+    # Model-call evidence records (harness 0.2.0+): the exact prompt
+    # sent, the raw model response, the parsed action, and the action
+    # result for every model call — each self-hashed. Older archives
+    # (no calls/ dir) still verify; only 0.2.0+ runs require them.
+    calls_d = archive_dir / "calls"
+    new_variant = str(manifest.get("harness", "")) >= "phase2-runner/0.2.0"
+    _budget_path = archive_dir / "budget.json"
+    _budget_calls = 0
+    if _budget_path.exists():
+        try:
+            _budget_calls = json.loads(
+                _budget_path.read_text()).get("totals", {}).get(
+                    "model_calls", 0)
+        except (json.JSONDecodeError, AttributeError):
+            _budget_calls = 0
+    if calls_d.exists():
+        recs = sorted(calls_d.glob("call_*.json"))
+        ok_recs = True
+        for p in recs:
+            try:
+                r = json.loads(p.read_text())
+                if hashlib.sha256(
+                        r["prompt"].encode()).hexdigest() != \
+                        r.get("prompt_sha256"):
+                    ok_recs = False
+                if hashlib.sha256(
+                        (r.get("raw_response") or "").encode()
+                        ).hexdigest() != r.get("raw_response_sha256"):
+                    ok_recs = False
+                if r.get("prompt_variant") != manifest.get("prompt_variant"):
+                    ok_recs = False
+            except (json.JSONDecodeError, KeyError, TypeError):
+                ok_recs = False
+        check("call_records_hash_ok", ok_recs, f"{len(recs)} records")
+        check("call_records_count_matches", len(recs) == _budget_calls,
+              f"records={len(recs)} calls={_budget_calls}")
+    elif new_variant and _budget_calls > 0:
+        check("call_records_present", False,
+              "harness 0.2.0+ archives with model calls require calls/")
+    if new_variant:
+        check("run_start_has_prompt_variant",
+              bool(starts) and "prompt_variant" in starts[0])
+        check("manifest_has_prompt_variant",
+              "prompt_variant" in manifest)
     # tick_seq contiguity per agent over signed-action records
     seqs: dict[str, list[int]] = {}
     for e in events:
