@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Phase 2 blind-discovery experiment runner (0.2.0).
+"""Phase 2 blind-discovery experiment runner (0.3.0).
 
 Runs the two experiment agents (exp-01 / exp-02) against a TEMPORARY
 Emerovia world database — never production. Each tick: GET world state
 -> prompt the model -> parse exactly ONE action -> sign and POST ->
 log everything to a signed evidence archive.
 
-Observation interface (0.2.0 / prompt variant "obs-interface-v1"):
+Observation interface (0.3.0 / prompt variant "social-visibility-v1"):
 agents receive accurate world observations (their own structures with
 real plot states from the public census), a bounded history of their
 own recent actions WITH the actual results (including rejections),
-and their own private exploration history. This is observation only:
-the runner never tells an agent what to do, suggests strategies, or
-hints at trade/cooperation — it reports what happened and lets the
-agent decide.
+their own private exploration history, and the already-public agent
+directory fields (name, live x/y, terrain) in [agents_visible]. This
+is observation only: the runner never tells an agent what to do,
+suggests strategies, or hints at trade/cooperation — it reports what
+happened and lets the agent decide.
 
 Boundaries (hard):
 - AC_DB_PATH is always a temp file. Production is never touched.
@@ -82,16 +83,20 @@ PINNED_MODEL = "muse-spark-1.3"
 RATE_IN_PER_M = 1.25
 RATE_OUT_PER_M = 4.25
 
-HARNESS_VERSION = "phase2-runner/0.2.0"
+HARNESS_VERSION = "phase2-runner/0.3.0"
 
-# Prompt/observation variant. "obs-interface-v1": accurate world
-# observations (the runner now reads the real /world/structures fields
-# owner_name/plots), a bounded per-agent action/result history, and the
-# agent's own private exploration history in every prompt, plus exact
-# per-call prompt/response evidence. Registered as a NEW variant:
-# earlier results stay labeled with the previous variant and are never
-# rewritten.
-PROMPT_VARIANT = "obs-interface-v1"
+# Prompt/observation variant. "social-visibility-v1": identical to
+# "obs-interface-v1" except the [agents_visible] section now passes
+# through the already-public fields from GET /world/agents (name, x,
+# y, terrain) instead of names only. Registered as a NEW variant
+# alongside obs-interface-v1: earlier results stay labeled with the
+# previous variant and are never rewritten. The exact observation-
+# interface diff vs 0.2.0 is documented in
+# phase2/variant-social-visibility-v1.md. No briefs, economics,
+# objectives, endowments, season, model, token limits, budget caps, or
+# safeguards changed; no cooperation/approach/trade instruction was
+# added to any prompt or brief.
+PROMPT_VARIANT = "social-visibility-v1"
 
 # How many of the agent's own recent actions (with results) travel in
 # each prompt. Small and bounded: memory, not a transcript.
@@ -741,8 +746,14 @@ class Phase2Runner:
             ("nearby_disclosed_tiles", json.dumps(nearby)),
             ("recent_filled_trades", json.dumps(ledger)),
             ("agents_visible", json.dumps(
-                [a.get("agent_name") for a in
-                 (others if isinstance(others, list) else [])])),
+                # social-visibility-v1 (0.3.0): pass through the
+                # already-public agent directory fields (name, live x/y,
+                # terrain) instead of names only. Pure observation: no
+                # instruction to communicate, approach, cooperate, or
+                # trade is added anywhere in the prompt or briefs.
+                [{"name": a.get("agent_name"), "x": a.get("x"),
+                  "y": a.get("y"), "terrain": a.get("terrain")}
+                 for a in (others if isinstance(others, list) else [])])),
             ("public_recipes", json.dumps(recipes)[:4000]),
         ]
         # State budget: per-tick cap minus the brief minus margin.
