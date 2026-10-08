@@ -512,7 +512,13 @@ class Phase2Runner:
         from fastapi.testclient import TestClient
         self.client = TestClient(appmod.app)
 
-    def setup_world(self):
+    def setup_world(self, agent_names=("exp-01", "exp-02")):
+        """Build a fresh experiment world and register the named agents.
+
+        agent_names defaults to both pilot agents; the isolated
+        usability controller passes ("exp-01",) for its one-farmer
+        check. Briefs, endowments, and world mechanics are identical
+        either way."""
         T = self.T
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()
@@ -527,6 +533,8 @@ class Phase2Runner:
         }
         specs = [("exp-01", ("plow",)), ("exp-02", ("ore_bounty",))]
         for name, advantages in specs:
+            if name not in agent_names:
+                continue
             key = T.make_key()
             T.register(self.client, name, key)
             T.spawn(self.client, key)
@@ -673,7 +681,7 @@ class Phase2Runner:
                     for p in (plots if isinstance(plots, list) else [])]})
         # Private exploration history: the agent's OWN discovered tiles
         # (signed read; the endpoint can only ever return the caller's
-        # tiles). Bounded to the most recent for prompt size.
+        # tiles, newest first). Bounded to the most recent for prompt size.
         try:
             discs = self._signed_get(key, "/world/discoveries",
                                      {"limit": 500})
@@ -685,7 +693,7 @@ class Phase2Runner:
             own_discs = [
                 {"x": d.get("x"), "y": d.get("y"),
                  "terrain": d.get("terrain")}
-                for d in discs[-DISCOVERIES_KEPT:]]
+                for d in discs[:DISCOVERIES_KEPT]]
         # Public recipe book (signed read; public info).
         try:
             recipes = self._signed_get(key, "/world/recipes")

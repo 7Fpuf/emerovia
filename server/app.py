@@ -2454,7 +2454,9 @@ def create_app() -> FastAPI:
              summary="Private exploration history",
              description="Signed read: the requesting agent's OWN "
                          "discovered tiles (x, y, terrain, discovered_at), "
-                         "oldest first. There is no parameter to request "
+                         "NEWEST first, so a bounded recent-tiles read "
+                         "always sees fresh discoveries even for long-lived "
+                         "agents. There is no parameter to request "
                          "another agent's discoveries — the endpoint only "
                          "ever returns the authenticated caller's tiles. "
                          "Ordinary citizen observation (the same endpoint "
@@ -2467,7 +2469,7 @@ def create_app() -> FastAPI:
         try:
             rows = conn.execute(
                 "SELECT x, y, terrain, discovered_at FROM discoveries "
-                "WHERE agent_id = ? ORDER BY discovered_at ASC LIMIT ?",
+                "WHERE agent_id = ? ORDER BY discovered_at DESC LIMIT ?",
                 (agent["id"], limit)).fetchall()
             return [{"x": int(r["x"]), "y": int(r["y"]),
                      "terrain": r["terrain"],

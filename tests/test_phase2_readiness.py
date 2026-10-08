@@ -848,3 +848,173 @@ def test_null_content_call_record_has_no_action(tmp_path):
         assert r["action_result"]["reason"] == "empty_model_content"
     finally:
         runner.logf.close()
+
+
+# ---------------------------------------------------------------- 9. finishing items (ChatGPT review)
+
+
+def test_discoveries_newest_first_beyond_500(tmp_path):
+    """Regression (ChatGPT review): with >500 discovered tiles the
+    endpoint must return the NEWEST first (ORDER BY discovered_at
+    DESC), so the runner's most-recent selection never loses fresh
+    tiles. Privacy: another agent's tiles never leak."""
+    import datetime
+    runner = make_runner(tmp_path)
+    runner.setup_world()
+    try:
+        T = runner.T
+        conn = T.db(runner.db_path)
+        try:
+            aid = conn.execute(
+                "SELECT id FROM agents WHERE name='exp-01'").fetchone()["id"]
+            bid = conn.execute(
+                "SELECT id FROM agents WHERE name='exp-02'").fetchone()["id"]
+            base = datetime.datetime.now(datetime.timezone.utc)
+            for i in range(520):
+                ts = (base + datetime.timedelta(seconds=i)).isoformat()
+                conn.execute(
+                    "INSERT OR IGNORE INTO discoveries "
+                    "(agent_id, x, y, terrain, discovered_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (aid, 1000 + i, 0, "plains", ts))
+            for i in range(5):
+                ts = (base + datetime.timedelta(seconds=i)).isoformat()
+                conn.execute(
+                    "INSERT OR IGNORE INTO discoveries "
+                    "(agent_id, x, y, terrain, discovered_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (bid, 2000 + i, 0, "desert", ts))
+            conn.commit()
+        finally:
+            conn.close()
+        a, b = runner.agents
+        da = runner._signed_get(a["key"], "/world/discoveries")
+        assert isinstance(da, list) and len(da) == 500, len(da)
+        # newest first: last-inserted tile leads, oldest of the
+        # returned window trails
+        assert da[0]["x"] == 1000 + 519, da[0]
+        assert da[-1]["x"] == 1000 + 20, da[-1]
+        assert all(da[i]["discovered_at"] >= da[i + 1]["discovered_at"]
+                   for i in range(len(da) - 1))
+        # none of b's tiles leak into a's read
+        assert not any(d["x"] >= 2000 for d in da)
+        db = runner._signed_get(b["key"], "/world/discoveries")
+        db_xy = {(d["x"], d["y"]) for d in db}
+        assert {(2000 + i, 0) for i in range(5)} <= db_xy, db_xy
+        # and still none of a's tiles leak into b's read
+        assert not any(d["x"] >= 1000 and d["x"] < 2000 for d in db)
+        # the prompt's own_discoveries section carries the newest
+        p = runner.build_prompt(a)
+        own = json.loads(_section(p, "own_discoveries"))
+        assert own and own[0]["x"] == 1000 + 519, own[0]
+    finally:
+        runner.logf.close()
+
+
+def test_usability_controller_stops_on_adaptation(tmp_path):
+    """Scripted: plant slot 0 (200), plant slot 0 again (400
+    occupied), plant slot 1 (200). The controller must stop early
+    with adaptation_observed and behavioral evidence — the pilot's
+    failure mode, then the fix. Offline, zero spend."""
+    import phase2_usability as pu
+    script = [
+        {"action": "farm_plant", "params": {"slot": 0},
+         "reasoning": "t"},
+        {"action": "farm_plant", "params": {"slot": 0},
+         "reasoning": "t"},
+        {"action": "farm_plant", "params": {"slot": 1},
+         "reasoning": "t"},
+    ]
+    ctl = pu.UsabilityController(tmp_path / "u1",
+                                 FixedBilledAdapter(script=script))
+    try:
+        reason = ctl.run()
+        assert reason == "adaptation_observed", reason
+        assert ctl.runner.model_calls == 3, ctl.runner.model_calls
+        ev = ctl.adaptation_evidence
+        assert ev["mode"] == "different_slot", ev
+        assert ev["trigger"]["http_status"] == 400, ev
+        assert "not empty" in str(ev["trigger"]["response"]), ev
+        assert ev["trigger"]["params"] == {"slot": 0}, ev
+        assert ev["adapted_action"]["params"] == {"slot": 1}, ev
+        assert ev["adapted_action"]["http_status"] == 200, ev
+        evs = read_events(ctl.runner)
+        assert any(e.get("event") == "usability_adaptation_observed"
+                   for e in evs)
+        # exact evidence records kept, hashed, no key material
+        recs = sorted((ctl.runner.archive_dir / "calls").glob("call_*.json"))
+        assert len(recs) == 3, len(recs)
+        r0 = json.loads(recs[0].read_text())
+        assert r0["prompt"] and r0["prompt_sha256"]
+        assert r0["raw_response"] and r0["raw_response_sha256"]
+        blob = json.dumps(r0)
+        assert "BEGIN" not in blob and "PRIVATE KEY" not in blob
+    finally:
+        ctl.runner.logf.close()
+
+
+def test_usability_controller_adaptation_via_different_action(tmp_path):
+    """Adaptation also counts when the agent takes a different action
+    after the occupied-slot rejection (behavioral, not self-report)."""
+    import phase2_usability as pu
+    script = [
+        {"action": "farm_plant", "params": {"slot": 0},
+         "reasoning": "t"},
+        {"action": "farm_plant", "params": {"slot": 0},
+         "reasoning": "t"},
+        {"action": "chat", "params": {"text": "hello"}, "reasoning": "t"},
+    ]
+    ctl = pu.UsabilityController(tmp_path / "u2",
+                                 FixedBilledAdapter(script=script))
+    try:
+        assert ctl.run() == "adaptation_observed"
+        assert ctl.adaptation_evidence["mode"] == "different_action"
+        assert ctl.adaptation_evidence["adapted_action"]["action"] == "chat"
+    finally:
+        ctl.runner.logf.close()
+
+
+def test_usability_controller_stops_at_ten_billed_calls(tmp_path):
+    """No adaptation: the agent re-plants slot 0 forever (pilot
+    failure mode). The controller must stop at EXACTLY 10 billed
+    calls — empty responses would count too, since they are billed."""
+    import phase2_usability as pu
+    script = [{"action": "farm_plant", "params": {"slot": 0},
+               "reasoning": "t"}]
+    ctl = pu.UsabilityController(tmp_path / "u3",
+                                 FixedBilledAdapter(script=script))
+    try:
+        reason = ctl.run()
+        assert reason == "call_budget", reason
+        assert ctl.runner.model_calls == 10, ctl.runner.model_calls
+        assert ctl.adaptation_evidence is None
+        evs = read_events(ctl.runner)
+        assert any(e.get("event") == "technical_stop"
+                   and e.get("reason") == "max_model_calls_reached"
+                   for e in evs)
+        assert not any(e.get("event") == "usability_adaptation_observed"
+                       for e in evs)
+    finally:
+        ctl.runner.logf.close()
+
+
+def test_usability_controller_dollar_cap_trips(tmp_path):
+    """The $1.00 hard cap trips via the fail-closed machinery even
+    when the billed-call limit is not yet reached."""
+    import phase2_usability as pu
+    script = [{"action": "wait", "params": {"minutes": 1},
+               "reasoning": "t"}]
+    ctl = pu.UsabilityController(
+        tmp_path / "u4",
+        FixedBilledAdapter(script=script, in_tok=100000, out_tok=100000))
+    try:
+        reason = ctl.run()
+        assert reason == "runner_halt", reason
+        assert ctl.runner.model_calls <= 10, ctl.runner.model_calls
+        assert ctl.runner.dollars() > 1.00, ctl.runner.dollars()
+        evs = read_events(ctl.runner)
+        assert any(e.get("event") == "technical_stop"
+                   and e.get("reason") == "budget_cap_exceeded"
+                   for e in evs)
+    finally:
+        ctl.runner.logf.close()
