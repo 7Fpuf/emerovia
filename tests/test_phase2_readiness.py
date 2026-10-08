@@ -932,7 +932,7 @@ def test_usability_controller_stops_on_adaptation(tmp_path):
         assert reason == "adaptation_observed", reason
         assert ctl.runner.model_calls == 3, ctl.runner.model_calls
         ev = ctl.adaptation_evidence
-        assert ev["mode"] == "different_slot", ev
+        assert ev["mode"] == "adaptation_observed", ev
         assert ev["trigger"]["http_status"] == 400, ev
         assert "not empty" in str(ev["trigger"]["response"]), ev
         assert ev["trigger"]["params"] == {"slot": 0}, ev
@@ -953,9 +953,11 @@ def test_usability_controller_stops_on_adaptation(tmp_path):
         ctl.runner.logf.close()
 
 
-def test_usability_controller_adaptation_via_different_action(tmp_path):
-    """Adaptation also counts when the agent takes a different action
-    after the occupied-slot rejection (behavioral, not self-report)."""
+def test_usability_controller_chat_after_trigger_is_inconclusive(tmp_path):
+    """Tightened definition: an unrelated chat after a planting
+    trigger is recorded as INCONCLUSIVE — it does not demonstrate
+    learning from the farm's state. The run must NOT stop early;
+    it continues to the billed-call budget."""
     import phase2_usability as pu
     script = [
         {"action": "farm_plant", "params": {"slot": 0},
@@ -967,11 +969,98 @@ def test_usability_controller_adaptation_via_different_action(tmp_path):
     ctl = pu.UsabilityController(tmp_path / "u2",
                                  FixedBilledAdapter(script=script))
     try:
-        assert ctl.run() == "adaptation_observed"
-        assert ctl.adaptation_evidence["mode"] == "different_action"
-        assert ctl.adaptation_evidence["adapted_action"]["action"] == "chat"
+        reason = ctl.run()
+        assert reason == "call_budget", reason
+        assert ctl.runner.model_calls == 10, ctl.runner.model_calls
+        assert ctl.adaptation_evidence is None
+        evs = read_events(ctl.runner)
+        assert not any(e.get("event") == "usability_adaptation_observed"
+                       for e in evs)
+        inc = [e for e in evs
+               if e.get("event") == "usability_inconclusive"]
+        assert inc, "chat after trigger was not recorded inconclusive"
+        assert inc[0]["mode"] == "inconclusive", inc[0]
+        assert inc[0]["trigger"]["params"] == {"slot": 0}, inc[0]
+        assert inc[0]["action"]["action"] == "chat", inc[0]
+        assert "trigger_summary" in inc[0] and "action_summary" in inc[0]
     finally:
         ctl.runner.logf.close()
+
+
+def test_detect_adaptation_harvest_never_trigger():
+    """A successful harvest must never be treated as a planting
+    trigger: harvest 200, then plant a different slot 200, is not
+    adaptation under the tightened definition."""
+    import phase2_usability as pu
+    history = [
+        {"tick_seq": 1, "action": "farm_harvest",
+         "params": {"slot": 0}, "http_status": 200,
+         "response": '{"action":"harvest"}'},
+        {"tick_seq": 2, "action": "farm_plant",
+         "params": {"slot": 1}, "http_status": 200,
+         "response": '{"action":"plant"}'},
+    ]
+    assert pu.detect_adaptation(history) is None
+    # harvest is not a trigger even on its own
+    is_trig, _ = pu._is_trigger(history[0])
+    assert not is_trig
+
+
+def test_detect_adaptation_failed_replant_not_adaptation():
+    """Planting a different slot after a trigger only counts when the
+    plant SUCCEEDS (200 proves the slot was empty). A 400 on the new
+    slot is not evidence of learning."""
+    import phase2_usability as pu
+    history = [
+        {"tick_seq": 1, "action": "farm_plant",
+         "params": {"slot": 0}, "http_status": 200,
+         "response": '{"action":"plant"}'},
+        {"tick_seq": 2, "action": "farm_plant",
+         "params": {"slot": 0}, "http_status": 400,
+         "response": '{"detail":"slot 0 is growing, not empty"}'},
+        {"tick_seq": 3, "action": "farm_plant",
+         "params": {"slot": 1}, "http_status": 400,
+         "response": '{"detail":"slot 1 is growing, not empty"}'},
+    ]
+    assert pu.detect_adaptation(history) is None
+
+
+def test_detect_adaptation_same_slot_replant_not_adaptation():
+    """Re-planting the same slot after a rejection is the pilot's
+    failure mode continuing — not adaptation."""
+    import phase2_usability as pu
+    history = [
+        {"tick_seq": 1, "action": "farm_plant",
+         "params": {"slot": 0}, "http_status": 200,
+         "response": '{"action":"plant"}'},
+        {"tick_seq": 2, "action": "farm_plant",
+         "params": {"slot": 0}, "http_status": 400,
+         "response": '{"detail":"slot 0 is growing, not empty"}'},
+        {"tick_seq": 3, "action": "farm_plant",
+         "params": {"slot": 0}, "http_status": 400,
+         "response": '{"detail":"slot 0 is growing, not empty"}'},
+    ]
+    assert pu.detect_adaptation(history) is None
+
+
+def test_detect_adaptation_strong_path_evidence_strings():
+    """The strong path carries reviewer-readable trigger/adapted
+    summaries naming the exact slot and outcome."""
+    import phase2_usability as pu
+    history = [
+        {"tick_seq": 5, "action": "farm_plant",
+         "params": {"slot": 0}, "http_status": 400,
+         "response": '{"detail":"slot 0 is growing, not empty"}'},
+        {"tick_seq": 7, "action": "farm_plant",
+         "params": {"slot": 2}, "http_status": 200,
+         "response": '{"action":"plant","state":"growing"}'},
+    ]
+    ev = pu.detect_adaptation(history)
+    assert ev is not None and ev["mode"] == "adaptation_observed"
+    assert "slot 0" in ev["trigger_summary"] and "400" in ev["trigger_summary"]
+    assert "'slot': 2" in ev["adapted_summary"] and "200" in ev["adapted_summary"]
+    assert ev["trigger"]["params"] == {"slot": 0}
+    assert ev["adapted_action"]["params"] == {"slot": 2}
 
 
 def test_usability_controller_stops_at_ten_billed_calls(tmp_path):
@@ -1018,3 +1107,125 @@ def test_usability_controller_dollar_cap_trips(tmp_path):
                    for e in evs)
     finally:
         ctl.runner.logf.close()
+
+
+def test_usability_wait_pause_never_busy_spins(tmp_path):
+    """While the agent waits (live mode), the controller pauses in a
+    bounded poll instead of looping. Dry-run never sleeps."""
+    import phase2_usability as pu
+    import time as _time
+    ctl = pu.UsabilityController(tmp_path / "uw",
+                                 FixedBilledAdapter())
+    try:
+        ctl.setup()
+        # dry-run: waits are skipped deterministically -> always 0
+        assert ctl._wait_pause_seconds(0) == 0.0
+        # live mode, agent waiting 10 minutes out: bounded poll
+        ctl.runner.cfg.dry_run = False
+        ctl.agent["wait_until"] = _time.time() + 600
+        assert ctl._wait_pause_seconds(0) == pu.WAIT_POLL_SECONDS
+        # live mode, wait almost over: pauses only the remainder
+        ctl.agent["wait_until"] = _time.time() + 5
+        assert ctl._wait_pause_seconds(0) == pytest.approx(5, abs=1)
+        # a consumed model call means this was not a wait tick
+        ctl.runner.model_calls = 1
+        assert ctl._wait_pause_seconds(0) == 0.0
+        ctl.runner.model_calls = 0
+        # wait already elapsed: no pause
+        ctl.agent["wait_until"] = _time.time() - 1
+        assert ctl._wait_pause_seconds(0) == 0.0
+    finally:
+        ctl.runner.logf.close()
+
+
+def test_usability_wait_uses_sleeper_not_spin(tmp_path):
+    """The run loop actually calls the (replaceable) sleeper while
+    waiting instead of spinning on tick()."""
+    import phase2_usability as pu
+    import time as _time
+    script = [{"action": "wait", "params": {"minutes": 30},
+               "reasoning": "t"},
+              {"action": "farm_plant", "params": {"slot": 0},
+               "reasoning": "t"}]
+    ctl = pu.UsabilityController(tmp_path / "uw2",
+                                 FixedBilledAdapter(script=script))
+    try:
+        ctl.setup()
+        # force live-mode wait semantics without sleeping for real
+        ctl.runner.cfg.dry_run = False
+        sleeps = []
+        ctl._sleeper = lambda s: sleeps.append(s)
+        ctl._wait_poll_seconds = 0.01
+        # one manual tick: wait action sets wait_until in the future
+        assert ctl.runner.tick(ctl.agent) == "ok"
+        assert ctl.agent["wait_until"] > _time.time()
+        calls_before = ctl.runner.model_calls
+        pause = ctl._wait_pause_seconds(calls_before)
+        assert pause == pytest.approx(0.01, abs=0.005)
+        ctl._sleeper(pause)
+        assert sleeps and all(s <= 0.01 + 1e-6 for s in sleeps)
+    finally:
+        ctl.runner.logf.close()
+
+
+def test_usability_wall_clock_limit_trips(tmp_path):
+    """A zero wall-clock budget stops the check immediately with a
+    recorded reason — bounding even pathological no-call loops."""
+    import phase2_usability as pu
+    ctl = pu.UsabilityController(tmp_path / "uwc",
+                                 FixedBilledAdapter(),
+                                 wall_clock_seconds=0)
+    try:
+        reason = ctl.run()
+        assert reason == "wall_clock", reason
+        assert ctl.runner.model_calls == 0, ctl.runner.model_calls
+        evs = read_events(ctl.runner)
+        assert any(e.get("event") == "usability_stop"
+                   and e.get("reason") == "wall_clock"
+                   for e in evs)
+        start = [e for e in evs
+                 if e.get("event") == "usability_check_start"][0]
+        assert start["wall_clock_seconds"] == 0
+    finally:
+        ctl.runner.logf.close()
+
+
+def test_usability_live_path_fails_loudly_without_credentials(monkeypatch,
+                                                              tmp_path):
+    """Invoking the live entry point without model credentials raises
+    AdapterConfigError BEFORE any world setup or spend — no silent
+    fallback, no $0-spend ambiguity."""
+    import phase2_usability as pu
+    clear_model_env(monkeypatch)
+    with pytest.raises(pr.AdapterConfigError) as ei:
+        pu.run_live_check(tmp_path / "live")
+    assert "PHASE2_MODEL_API_URL" in str(ei.value)
+    # nothing was set up: no archive, no spend, no calls
+    assert not (tmp_path / "live").exists()
+
+
+def test_usability_live_path_rejects_scripted_adapter(tmp_path):
+    """A non-dry-run controller REFUSES scripted/test adapters: there
+    is no code path by which one can silently replace the real model
+    in a live invocation."""
+    import phase2_usability as pu
+    with pytest.raises(pr.AdapterConfigError) as ei:
+        pu.UsabilityController(tmp_path / "ul",
+                               FixedBilledAdapter(),
+                               dry_run=False)
+    assert "scripted" in str(ei.value).lower()
+    with pytest.raises(pr.AdapterConfigError):
+        pu.UsabilityController(tmp_path / "ul2",
+                               pr.StubAdapter(),
+                               dry_run=False)
+
+
+def test_usability_live_entry_takes_no_adapter():
+    """run_live_check has no adapter parameter by design — injection
+    is impossible at the signature level."""
+    import inspect
+    import phase2_usability as pu
+    params = inspect.signature(pu.run_live_check).parameters
+    assert "adapter" not in params, params
+    assert set(params) >= {"archive_dir", "max_billed_calls",
+                           "dollar_cap", "wall_clock_seconds"}
