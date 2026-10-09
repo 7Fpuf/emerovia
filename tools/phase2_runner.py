@@ -542,7 +542,12 @@ class Phase2Runner:
         update — setup-time only, consistent with the runner's other
         direct-DB setup writes (grant_tool, set_inventory); no AP is
         spent and no world mechanics change — then claim that tile.
+
+        Any relocation is recorded in the evidence archive
+        (spawn_relocation event) so starting conditions can be
+        reconstructed (ChatGPT final pre-launch requirement).
         """
+        ox, oy = x, y  # original spawn, for the relocation record
         conn = T.db(self.db_path)
         try:
             for _ in range(25):
@@ -570,6 +575,11 @@ class Phase2Runner:
                 conn.commit()
         finally:
             conn.close()
+        if (x, y) != (ox, oy):
+            self.log({"event": "spawn_relocation", "agent": name,
+                      "from": [ox, oy], "to": [x, y],
+                      "reason": "spawn tile already claimed; relocated to "
+                                "nearby unclaimed tile at setup"})
         T.signed_request(self.client, key, "POST", "/world/claim",
                          {"x": x, "y": y})
         return x, y
@@ -696,7 +706,7 @@ class Phase2Runner:
         body = "\n".join(f"[{name}]\n{text}" for name, text in kept)
         return body, dropped
 
-    def _verify_treatment_delivery(self, sections, dropped):
+    def _verify_treatment_delivery(self, agent, sections, dropped):
         """Treatment-delivery guarantee (ChatGPT pre-launch requirement).
 
         In the social-visibility variant the agent coordinates in
@@ -719,6 +729,29 @@ class Phase2Runner:
                        for e in entries)):
             raise TreatmentUnavailable(
                 "agents_visible entries malformed; run INVALID")
+        # Counterpart check (ChatGPT final pre-launch requirement):
+        # the observing agent must receive every OTHER experiment
+        # agent with usable coordinates. Field names alone do not
+        # prove delivery: a self-only list, a missing counterpart, or
+        # null/non-integer coordinates must halt the run as invalid.
+        by_name = {e["name"]: e for e in entries}
+        counterparts = [a["name"] for a in self.agents
+                        if a["name"] != agent["name"]]
+        for other in counterparts:
+            e = by_name.get(other)
+            if e is None:
+                raise TreatmentUnavailable(
+                    f"counterpart {other} missing from agents_visible; "
+                    "run INVALID")
+            if (not isinstance(e["x"], int) or isinstance(e["x"], bool)
+                    or not isinstance(e["y"], int)
+                    or isinstance(e["y"], bool)):
+                raise TreatmentUnavailable(
+                    f"counterpart {other} has invalid coordinates; "
+                    "run INVALID")
+            if not isinstance(e["terrain"], str) or not e["terrain"]:
+                raise TreatmentUnavailable(
+                    f"counterpart {other} has invalid terrain; run INVALID")
 
     def build_prompt(self, agent: dict) -> str:
         """Full ordinary world information per protocol §7:
@@ -866,7 +899,7 @@ class Phase2Runner:
                   - estimate_tokens(agent["brief"]) - 600)
         body, dropped = self._fit_sections(sections, max(1200, budget))
         if PROMPT_VARIANT == "social-visibility-v1":
-            self._verify_treatment_delivery(sections, dropped)
+            self._verify_treatment_delivery(agent, sections, dropped)
         note = ("\n[note: omitted for prompt size: "
                 + ", ".join(dropped) + "]") if dropped else ""
         return (agent["brief"]

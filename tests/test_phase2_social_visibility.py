@@ -280,8 +280,9 @@ def _read_events(runner):
 def test_verify_treatment_delivery_rejects_dropped_section(tmp_path):
     runner = _setup_two_agents(tmp_path)
     try:
+        me = runner.agents[0]
         with pytest.raises(pr.TreatmentUnavailable):
-            runner._verify_treatment_delivery([], ["agents_visible"])
+            runner._verify_treatment_delivery(me, [], ["agents_visible"])
     finally:
         runner.logf.close()
 
@@ -292,9 +293,10 @@ def test_verify_treatment_delivery_rejects_malformed_entries(tmp_path):
         bad_name_only = [("agents_visible",
                            json.dumps([{"name": "exp-02"}]))]
         bad_empty = [("agents_visible", json.dumps([]))]
+        me = runner.agents[0]
         for sections in (bad_name_only, bad_empty):
             with pytest.raises(pr.TreatmentUnavailable):
-                runner._verify_treatment_delivery(sections, [])
+                runner._verify_treatment_delivery(me, sections, [])
     finally:
         runner.logf.close()
 
@@ -338,5 +340,120 @@ def test_legacy_variant_layout_unchanged(tmp_path, monkeypatch):
         assert idx == sorted(idx), idx
         entries = json.loads(_section(p, "agents_visible"))
         assert all(isinstance(e, str) for e in entries), entries
+    finally:
+        runner.logf.close()
+
+
+def _av_sections(entries):
+    return [("agents_visible", json.dumps(entries))]
+
+
+def test_self_only_list_halts(tmp_path):
+    """A list containing only the observing agent must halt: the
+    counterpart's identity and coordinates were not delivered."""
+    runner = _setup_two_agents(tmp_path)
+    try:
+        me = runner.agents[0]
+        sections = _av_sections(
+            [{"name": me["name"], "x": 7, "y": 0, "terrain": "plains"}])
+        with pytest.raises(pr.TreatmentUnavailable):
+            runner._verify_treatment_delivery(me, sections, [])
+    finally:
+        runner.logf.close()
+
+
+def test_missing_counterpart_halts(tmp_path):
+    """Entries with valid field names but no counterpart agent halt."""
+    runner = _setup_two_agents(tmp_path)
+    try:
+        me = runner.agents[0]
+        sections = _av_sections([
+            {"name": me["name"], "x": 7, "y": 0, "terrain": "plains"},
+            {"name": "someone-else", "x": 9, "y": 9, "terrain": "forest"},
+        ])
+        with pytest.raises(pr.TreatmentUnavailable):
+            runner._verify_treatment_delivery(me, sections, [])
+    finally:
+        runner.logf.close()
+
+
+def test_null_or_invalid_coordinates_halt(tmp_path):
+    """Null, non-integer, or empty counterpart fields must halt."""
+    runner = _setup_two_agents(tmp_path)
+    try:
+        me, other = runner.agents[0], runner.agents[1]
+        bad = [
+            {"name": other["name"], "x": None, "y": 3,
+             "terrain": "plains"},
+            {"name": other["name"], "x": "23", "y": 3,
+             "terrain": "plains"},
+            {"name": other["name"], "x": 23, "y": 3, "terrain": ""},
+            {"name": other["name"], "x": True, "y": 3,
+             "terrain": "plains"},
+        ]
+        for entry in bad:
+            sections = _av_sections(
+                [{"name": me["name"], "x": 7, "y": 0,
+                  "terrain": "plains"}, entry])
+            with pytest.raises(pr.TreatmentUnavailable):
+                runner._verify_treatment_delivery(me, sections, [])
+    finally:
+        runner.logf.close()
+
+
+def test_valid_counterpart_list_passes(tmp_path):
+    """Both agents with valid integer coordinates and terrain pass."""
+    runner = _setup_two_agents(tmp_path)
+    try:
+        me, other = runner.agents[0], runner.agents[1]
+        entries = [
+            {"name": me["name"], "x": 7, "y": 0, "terrain": "plains"},
+            {"name": other["name"], "x": 23, "y": 3, "terrain": "forest"},
+        ]
+        runner._verify_treatment_delivery(me, _av_sections(entries), [])
+    finally:
+        runner.logf.close()
+
+
+def test_spawn_relocation_recorded_in_archive(tmp_path):
+    """A setup-time spawn relocation is recorded in the evidence
+    archive so starting conditions can be reconstructed."""
+    import test_econ_validation_phase1 as T
+
+    runner = make_runner(tmp_path)
+    runner.setup_world(agent_names=("exp-01",))
+    try:
+        conn = T.db(runner.db_path)
+        try:
+            row = conn.execute(
+                "SELECT x, y FROM structures WHERE kind = 'farm'"
+                " LIMIT 1").fetchone()
+            fx, fy = row["x"], row["y"]
+        finally:
+            conn.close()
+        # register + spawn exp-02, then force the rare collision by
+        # placing it on exp-01's claimed farm tile
+        key2 = T.make_key()
+        T.register(runner.client, "exp-02", key2)
+        T.spawn(runner.client, key2)
+        pk2 = T.pubkey_hex(key2)
+        conn = T.db(runner.db_path)
+        try:
+            conn.execute(
+                "UPDATE agent_world SET x = ?, y = ? WHERE agent_id ="
+                " (SELECT id FROM agents WHERE pubkey = ?)",
+                (fx, fy, pk2))
+            conn.commit()
+        finally:
+            conn.close()
+        x, y = runner._claim_spawn_tile(T, key2, pk2, fx, fy, "exp-02")
+        assert (x, y) != (fx, fy), "should have relocated off the tile"
+        evs = [json.loads(l) for l in
+               runner.log_path.read_text().splitlines() if l.strip()]
+        relocs = [e for e in evs if e.get("event") == "spawn_relocation"]
+        assert len(relocs) == 1, evs
+        r = relocs[0]
+        assert r["agent"] == "exp-02"
+        assert r["from"] == [fx, fy] and r["to"] == [x, y]
     finally:
         runner.logf.close()

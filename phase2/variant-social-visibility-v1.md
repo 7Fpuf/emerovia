@@ -81,12 +81,18 @@ guaranteed two ways:
    both agents — the treatment survives.
 2. **Invalid-run rule.** After `_fit_sections`, `build_prompt` verifies
    (social-visibility-v1 only) that `[agents_visible]` was kept and
-   that every entry carries exactly `name`/`x`/`y`/`terrain`. If the
-   section was dropped or an entry is malformed, `build_prompt` raises
-   `TreatmentUnavailable`, which `tick()` converts into an immediate
-   halt: a `technical_stop` event with reason
-   **`treatment_unavailable`** and `run_valid: false`, recorded in
-   `run.jsonl` and the archive.
+   that every entry carries exactly `name`/`x`/`y`/`terrain`. The
+   checker then verifies the *counterpart*: every other registered
+   experiment agent must appear with valid integer x/y coordinates
+   (not null, not strings, not booleans) and non-empty terrain —
+   field names alone do not prove delivery, so a self-only list, a
+   missing counterpart, or invalid coordinates also raise
+   `TreatmentUnavailable` (ChatGPT final pre-launch requirement,
+   2026-10-09). If the section was dropped or an entry is malformed,
+   `build_prompt` raises `TreatmentUnavailable`, which `tick()`
+   converts into an immediate halt: a `technical_stop` event with
+   reason **`treatment_unavailable`** and `run_valid: false`,
+   recorded in `run.jsonl` and the archive.
 
 **Any run ending with `treatment_unavailable` is INVALID.** Its social
 observations must not be used — absence of interaction in such a run
@@ -133,7 +139,11 @@ empty-response safeguard itself. `setup_world` now relocates the agent
 to a nearby unclaimed, unoccupied land tile (direct DB update,
 setup-time only; no AP spent, no world mechanics changed) and the
 farm-tile search excludes claimed tiles. Regression test:
-`test_setup_world_survives_spawn_on_claimed_tile`.
+`test_setup_world_survives_spawn_on_claimed_tile`. Any such relocation
+is recorded in the evidence archive as a `spawn_relocation` event
+(agent, original spawn, new position, reason), so starting conditions
+can be reconstructed for every run (ChatGPT final pre-launch
+requirement, 2026-10-09).
 
 ## Predefined observation milestones
 
