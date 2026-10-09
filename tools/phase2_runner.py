@@ -147,6 +147,18 @@ class UncertainBillingHalt(RuntimeError):
     budget.json."""
 
 
+class TreatmentUnavailable(RuntimeError):
+    """The experimental treatment was not delivered in a prompt.
+
+    In the social-visibility variant the agent coordinates in
+    [agents_visible] ARE the treatment. If token-budget pressure
+    dropped that section (or its entries are malformed), the run
+    cannot answer the social-visibility question — it must halt as a
+    technical stop with reason 'treatment_unavailable' and be
+    classified INVALID, never silently run a treatment-free
+    experiment."""
+
+
 # --------------------------------------------------------------------------
 # Token estimation (heuristic; the API's BILLED usage is authoritative)
 
@@ -517,6 +529,51 @@ class Phase2Runner:
         from fastapi.testclient import TestClient
         self.client = TestClient(appmod.app)
 
+    def _claim_spawn_tile(self, T, key, pk, x, y, name):
+        """Claim the agent's spawn tile, relocating on the rare collision
+        where another experiment agent already claimed it.
+
+        spawn() draws from land tiles with no agent standing on them,
+        but does not exclude claimed-yet-unoccupied tiles (e.g. the
+        first agent's farm tile). The second agent then lands there
+        (~0.1% of setups) and its setup claim 400s ("tile already
+        claimed"), crashing setup_world. On collision, move the agent
+        to a nearby unclaimed, unoccupied land tile via direct DB
+        update — setup-time only, consistent with the runner's other
+        direct-DB setup writes (grant_tool, set_inventory); no AP is
+        spent and no world mechanics change — then claim that tile.
+        """
+        conn = T.db(self.db_path)
+        try:
+            for _ in range(25):
+                if not conn.execute(
+                        "SELECT 1 FROM claims WHERE x = ? AND y = ?",
+                        (x, y)).fetchone():
+                    break
+                row = conn.execute(
+                    "SELECT x, y FROM world_tiles"
+                    " WHERE terrain != 'ocean'"
+                    " AND NOT EXISTS (SELECT 1 FROM agent_world a"
+                    "  WHERE a.x = world_tiles.x AND a.y = world_tiles.y)"
+                    " AND NOT EXISTS (SELECT 1 FROM claims c"
+                    "  WHERE c.x = world_tiles.x AND c.y = world_tiles.y)"
+                    " AND max(abs(x - ?), abs(y - ?)) <= 10"
+                    " LIMIT 1", (x, y)).fetchone()
+                if row is None:
+                    raise RuntimeError(
+                        f"{name}: no unclaimed tile near spawn collision")
+                x, y = row["x"], row["y"]
+                conn.execute(
+                    "UPDATE agent_world SET x = ?, y = ? WHERE agent_id ="
+                    " (SELECT id FROM agents WHERE pubkey = ?)",
+                    (x, y, pk))
+                conn.commit()
+        finally:
+            conn.close()
+        T.signed_request(self.client, key, "POST", "/world/claim",
+                         {"x": x, "y": y})
+        return x, y
+
     def setup_world(self, agent_names=("exp-01", "exp-02")):
         """Build a fresh experiment world and register the named agents.
 
@@ -551,8 +608,9 @@ class Phase2Runner:
                 T.grant_tool(self.db_path, pk, adv, durability=300)
             st = T.me(self.client, key)
             x, y = st["x"], st["y"]
-            T.signed_request(self.client, key, "POST", "/world/claim",
-                             {"x": x, "y": y})
+            # Robust to the rare spawn-on-claimed-tile collision (see
+            # _claim_spawn_tile): relocates instead of crashing setup.
+            x, y = self._claim_spawn_tile(T, key, pk, x, y, name)
             T.set_inventory(self.db_path, pk,
                             {"stone": 4, "clay": 2, "timber": 2})
             r = T.signed_request(self.client, key, "POST", "/world/build",
@@ -566,6 +624,8 @@ class Phase2Runner:
                     " AND (ABS(x - ?) + ABS(y - ?)) = 1"
                     " AND NOT EXISTS (SELECT 1 FROM structures s"
                     " WHERE s.x = world_tiles.x AND s.y = world_tiles.y)"
+                    " AND NOT EXISTS (SELECT 1 FROM claims c"
+                    " WHERE c.x = world_tiles.x AND c.y = world_tiles.y)"
                     " LIMIT 1", (x, y)).fetchone()
                 assert adj is not None, "no adjacent free tile for farm"
                 fx, fy = adj["x"], adj["y"]
@@ -635,6 +695,30 @@ class Phase2Runner:
                 dropped.append(name)
         body = "\n".join(f"[{name}]\n{text}" for name, text in kept)
         return body, dropped
+
+    def _verify_treatment_delivery(self, sections, dropped):
+        """Treatment-delivery guarantee (ChatGPT pre-launch requirement).
+
+        In the social-visibility variant the agent coordinates in
+        [agents_visible] ARE the experimental treatment. A run whose
+        prompts lack them cannot answer the research question: raise
+        TreatmentUnavailable (caught in tick() -> technical_stop with
+        reason 'treatment_unavailable', run INVALID) rather than
+        silently running a treatment-free experiment.
+        """
+        if "agents_visible" in dropped:
+            raise TreatmentUnavailable(
+                "agents_visible dropped for prompt size; run INVALID")
+        try:
+            entries = json.loads(dict(sections)["agents_visible"])
+        except (ValueError, KeyError):
+            entries = None
+        if (not isinstance(entries, list) or not entries
+                or any(not isinstance(e, dict)
+                       or set(e) != {"name", "x", "y", "terrain"}
+                       for e in entries)):
+            raise TreatmentUnavailable(
+                "agents_visible entries malformed; run INVALID")
 
     def build_prompt(self, agent: dict) -> str:
         """Full ordinary world information per protocol §7:
@@ -727,6 +811,22 @@ class Phase2Runner:
             "chits": me.get("chits"),
             "actions_so_far": agent["actions"],
         }
+        if PROMPT_VARIANT == "social-visibility-v1":
+            # Pass through the already-public agent directory fields
+            # (name, live x/y, terrain) instead of names only. Pure
+            # observation: no instruction to communicate, approach,
+            # cooperate, or trade is added anywhere in the prompt or
+            # briefs.
+            av_content = [{"name": a.get("agent_name"), "x": a.get("x"),
+                           "y": a.get("y"), "terrain": a.get("terrain")}
+                          for a in (others
+                                    if isinstance(others, list) else [])]
+        else:
+            # obs-interface-v1 legacy: names only (layout and content
+            # preserved byte-identical to the 0.2.0 interface).
+            av_content = [a.get("agent_name") for a in
+                          (others if isinstance(others, list) else [])]
+        agents_visible_section = ("agents_visible", json.dumps(av_content))
         sections = [
             ("core_state", json.dumps(core)),
             # The agent's own recent actions WITH their actual results
@@ -734,6 +834,17 @@ class Phase2Runner:
             # Pure observation: what happened, never what to do next.
             ("recent_actions",
              json.dumps(agent.get("recent_actions", []))),
+        ]
+        if PROMPT_VARIANT == "social-visibility-v1":
+            # Treatment protection (ChatGPT pre-launch requirement):
+            # the coordinates in [agents_visible] ARE the experimental
+            # treatment. _fit_sections drops from the END of this list
+            # under token-budget pressure, so the treatment rides
+            # directly behind recent_actions and is dropped LAST.
+            # obs-interface-v1 keeps its original layout (section stays
+            # in its legacy position below).
+            sections.append(agents_visible_section)
+        sections += [
             ("open_trade_offers", json.dumps([
                 {"id": o["id"], "maker": o.get("maker_name"),
                  "give": o.get("give"), "want": o.get("want")}
@@ -745,21 +856,17 @@ class Phase2Runner:
             ("own_discoveries", json.dumps(own_discs)),
             ("nearby_disclosed_tiles", json.dumps(nearby)),
             ("recent_filled_trades", json.dumps(ledger)),
-            ("agents_visible", json.dumps(
-                # social-visibility-v1 (0.3.0): pass through the
-                # already-public agent directory fields (name, live x/y,
-                # terrain) instead of names only. Pure observation: no
-                # instruction to communicate, approach, cooperate, or
-                # trade is added anywhere in the prompt or briefs.
-                [{"name": a.get("agent_name"), "x": a.get("x"),
-                  "y": a.get("y"), "terrain": a.get("terrain")}
-                 for a in (others if isinstance(others, list) else [])])),
-            ("public_recipes", json.dumps(recipes)[:4000]),
         ]
+        if PROMPT_VARIANT != "social-visibility-v1":
+            # Legacy layout for obs-interface-v1: byte-identical order.
+            sections.append(agents_visible_section)
+        sections.append(("public_recipes", json.dumps(recipes)[:4000]))
         # State budget: per-tick cap minus the brief minus margin.
         budget = (self.cfg.per_tick_in_cap
                   - estimate_tokens(agent["brief"]) - 600)
         body, dropped = self._fit_sections(sections, max(1200, budget))
+        if PROMPT_VARIANT == "social-visibility-v1":
+            self._verify_treatment_delivery(sections, dropped)
         note = ("\n[note: omitted for prompt size: "
                 + ", ".join(dropped) + "]") if dropped else ""
         return (agent["brief"]
@@ -1030,7 +1137,20 @@ class Phase2Runner:
             return "ok"
         if not self.check_budget_before_call():
             return "halt"
-        prompt = self.build_prompt(agent)
+        try:
+            prompt = self.build_prompt(agent)
+        except TreatmentUnavailable as e:
+            # The experimental treatment (agent coordinates) was not
+            # delivered in this prompt. The run cannot answer the
+            # social-visibility question: halt immediately and
+            # classify the run INVALID. This is a technical stop, never
+            # an economic finding.
+            self.log({"event": "technical_stop",
+                      "reason": "treatment_unavailable",
+                      "agent": agent["name"],
+                      "detail": str(e)[:200],
+                      "run_valid": False})
+            return "halt"
         try:
             text, tin, tout = self.adapter.complete(prompt)
         except TokenLimitExceeded as e:

@@ -284,3 +284,66 @@ def test_run_exception_reason_not_loop_complete(tmp_path, monkeypatch):
     ends = [e for e in evs if e.get("event") == "run_end"]
     assert ends and ends[-1]["reason"] == "run_exception"
     assert ends[-1]["reason"] != "loop_complete"
+
+
+def test_setup_world_survives_spawn_on_claimed_tile(tmp_path):
+    """Regression: spawn() avoids agent-occupied tiles but not
+    claimed-yet-unoccupied ones. If the second agent lands on the
+    first agent's claimed farm tile, setup must relocate it and claim
+    a free tile instead of crashing with 'tile already claimed'.
+
+    (Root cause of the intermittent
+    test_consecutive_empty_responses_halt_at_bound failure: a ~0.1%
+    SystemRandom spawn collision during setup_world, unrelated to the
+    empty-response safeguard itself.)
+    """
+    import test_econ_validation_phase1 as T
+
+    runner = make_runner(tmp_path)
+    runner.setup_world(agent_names=("exp-01",))
+    try:
+        # exp-01's claimed farm tile (claimed, unoccupied -> in spawn pool)
+        fx, fy = runner.agents[0]["farm_xy"] \
+            if "farm_xy" in runner.agents[0] else (None, None)
+        if fx is None:
+            conn = T.db(runner.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT x, y FROM structures WHERE kind = 'farm'"
+                    " LIMIT 1").fetchone()
+                fx, fy = row["x"], row["y"]
+            finally:
+                conn.close()
+        # register + spawn exp-02, then force the rare collision by
+        # placing it on exp-01's claimed farm tile
+        key2 = T.make_key()
+        T.register(runner.client, "exp-02", key2)
+        T.spawn(runner.client, key2)
+        pk2 = T.pubkey_hex(key2)
+        conn = T.db(runner.db_path)
+        try:
+            conn.execute(
+                "UPDATE agent_world SET x = ?, y = ? WHERE agent_id ="
+                " (SELECT id FROM agents WHERE pubkey = ?)",
+                (fx, fy, pk2))
+            conn.commit()
+        finally:
+            conn.close()
+        # must relocate + claim, not raise
+        x, y = runner._claim_spawn_tile(T, key2, pk2, fx, fy, "exp-02")
+        assert (x, y) != (fx, fy), "should have relocated off the tile"
+        conn = T.db(runner.db_path)
+        try:
+            owner = conn.execute(
+                "SELECT owner_pubkey FROM claims WHERE x = ? AND y = ?",
+                (x, y)).fetchone()
+            pos = conn.execute(
+                "SELECT x, y FROM agent_world WHERE agent_id ="
+                " (SELECT id FROM agents WHERE pubkey = ?)",
+                (pk2,)).fetchone()
+        finally:
+            conn.close()
+        assert owner is not None and owner["owner_pubkey"] == pk2
+        assert (pos["x"], pos["y"]) == (x, y)
+    finally:
+        runner.logf.close()

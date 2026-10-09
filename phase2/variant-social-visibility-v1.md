@@ -23,7 +23,12 @@ information and did not act," not to produce trade.
 
 ## Exact observation-interface diff vs 0.2.0 / obs-interface-v1
 
-`tools/phase2_runner.py`, `build_prompt`, the `[agents_visible]` section:
+`tools/phase2_runner.py`, `build_prompt`, the `[agents_visible]` section —
+two changes, both scoped to `PROMPT_VARIANT == "social-visibility-v1"`
+(the obs-interface-v1 code path keeps its original names-only content
+and original section order byte-identical):
+
+1. **Content:** pass through the already-public fields:
 
 ```diff
              ("agents_visible", json.dumps(
@@ -34,10 +39,18 @@ information and did not act," not to produce trade.
 +                 for a in (others if isinstance(others, list) else [])])),
 ```
 
+2. **Priority:** `[agents_visible]` moved from 9th of 10 to 3rd in the
+section list (directly after `recent_actions`). `_fit_sections` drops
+from the end of the list under token-budget pressure, so the
+coordinates — which ARE the experimental treatment — are evaluated
+early and, being small, are retained while larger later sections drop
+first.
+
 Plus the version registration (`HARNESS_VERSION =
-"phase2-runner/0.3.0"`, `PROMPT_VARIANT = "social-visibility-v1"`) and
-this document. Nothing else in the prompt assembly changed: same
-section headings, same order, same briefs, same state-budget fitting.
+"phase2-runner/0.3.0"`, `PROMPT_VARIANT = "social-visibility-v1"`),
+the `treatment_unavailable` invalid-run rule below, and this document.
+Nothing else in the prompt assembly changed: same briefs, same
+state-budget fitting.
 
 Example rendered section:
 
@@ -52,6 +65,34 @@ briefs already describe the public agent list ("shows who else is in the
 world"); the prompt now actually delivers what the brief describes.
 This is observation only, consistent with the runner's standing rule:
 report what happened, never what to do.
+
+## Treatment protection and the invalid-run rule
+
+(ChatGPT pre-launch requirement, 2026-10-08.) The coordinates in
+`[agents_visible]` are the experimental treatment. A run whose prompts
+lack them cannot answer the research question, so treatment delivery is
+guaranteed two ways:
+
+1. **Priority.** As documented above, the section rides 3rd in the
+   fitting order and is small (~80 tokens against a 1200-token minimum
+   section budget), so token-budget pressure drops larger later
+   sections first. In all representative prompt shapes tested —
+   including fattened late-run prompts at the real 6000-token cap for
+   both agents — the treatment survives.
+2. **Invalid-run rule.** After `_fit_sections`, `build_prompt` verifies
+   (social-visibility-v1 only) that `[agents_visible]` was kept and
+   that every entry carries exactly `name`/`x`/`y`/`terrain`. If the
+   section was dropped or an entry is malformed, `build_prompt` raises
+   `TreatmentUnavailable`, which `tick()` converts into an immediate
+   halt: a `technical_stop` event with reason
+   **`treatment_unavailable`** and `run_valid: false`, recorded in
+   `run.jsonl` and the archive.
+
+**Any run ending with `treatment_unavailable` is INVALID.** Its social
+observations must not be used — absence of interaction in such a run
+says nothing about the agents. This is a technical stop, never an
+economic finding, and it joins the existing inconclusive conditions
+below.
 
 ## Spawn and starting-condition reproducibility
 
@@ -82,6 +123,18 @@ experimenter bias. The run archive records actual starting positions
 (run-4: exp-01 (7,0), exp-02 (22,7), Chebyshev 15); cross-variant
 comparisons must control for separation distance, not exact tiles.
 
+**Setup robustness fix (2026-10-08, pre-launch verification):**
+`spawn()` avoids agent-occupied tiles but not claimed-yet-unoccupied
+ones, so ~0.1% of setups the second agent landed on the first agent's
+claimed farm tile and its setup claim 400d ("tile already claimed"),
+crashing `setup_world` — this was the root cause of the intermittent
+`test_consecutive_empty_responses_halt_at_bound` failure, not the
+empty-response safeguard itself. `setup_world` now relocates the agent
+to a nearby unclaimed, unoccupied land tile (direct DB update,
+setup-time only; no AP spent, no world mechanics changed) and the
+farm-tile search excludes claimed tiles. Regression test:
+`test_setup_world_survives_spawn_on_claimed_tile`.
+
 ## Predefined observation milestones
 
 Distinct, evidence-based categories. Evidence sources: archived exact
@@ -105,10 +158,13 @@ offers, the public ledger, per-tick positions from snapshots.
    ledger.
 
 **Inconclusive conditions (do not over-interpret):**
-- A technical stop (4-consecutive-empty safeguard) or a run that ends
-  before a meaningful observation window is **inconclusive**, not a
-  behavioral finding. Run-4's 9 empty responses (38% of its spend)
-  show this failure mode is live.
+- A technical stop (4-consecutive-empty safeguard) **or a
+  `treatment_unavailable` halt** — or a run that ends before a
+  meaningful observation window — is **inconclusive**, not a
+  behavioral finding. A `treatment_unavailable` run is additionally
+  INVALID: its social observations cannot be used at all. Run-4's 9
+  empty responses (38% of its spend) show the empty-response failure
+  mode is live.
 - Continued silence with positions visible is **not** automatically a
   motivational failure — especially given demonstrated empty-response
   unreliability, which can cut runs short for purely technical
@@ -145,6 +201,11 @@ of any added instruction.
       harness green; zero paid calls
 - [x] Spawn reproducibility documented
 - [x] Milestones and inconclusive conditions predefined
-- [ ] ChatGPT pre-launch review of this document + the diff
+- [x] Treatment protection: `[agents_visible]` 3rd in fitting order
+      (variant-only); `treatment_unavailable` invalid-run rule
+      implemented, tested, and documented
+- [ ] ChatGPT pre-launch review of the requirement-1/2 evidence
+      (conditional GO received 2026-10-08; these changes close the two
+      conditions)
 - [ ] Trevor's explicit approval of the **paid launch** (separate
       decision; not granted by the build approval)
